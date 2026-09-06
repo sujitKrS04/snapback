@@ -31,6 +31,8 @@ from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli
 from livekit.agents import stt, tts
 from livekit.plugins import deepgram, rime
 
+from orchestrator import SessionStateManager
+
 load_dotenv()
 
 # Setup standard logger
@@ -245,6 +247,7 @@ class VoiceAudioPipeline:
         log_file_override: Optional[str] = None,
         tool_executor: Optional[Callable[[str], Awaitable[str]]] = None,
         run_id: Optional[str] = None,
+        session: Optional[SessionStateManager] = None,
     ) -> None:
         self.audio_source = audio_source
         self.active_tts_provider = active_tts_provider or os.getenv("TTS_PROVIDER", "rime")
@@ -261,6 +264,11 @@ class VoiceAudioPipeline:
         self.tool_executor = tool_executor
 
         self.logger = StructuredTimelineLogger(run_id=run_id, default_log_path=log_file_override)
+        self._session = session
+        if self._session:
+            self._session.run_id = self.logger.run_id
+            if not self._session._log_file:
+                self._session._log_file = Path(self.logger.default_log_path) if self.logger.default_log_path else Path(os.getenv("LOG_FILE_PATH", "logs/agent.log"))
 
         # State tracking
         self.state: PipelineState = PipelineState.IDLE
@@ -368,6 +376,10 @@ class VoiceAudioPipeline:
             self._current_response_task = None
             self.is_tts_active = False
 
+            if self._session:
+                # Force invalidate any in-flight tools with a new interrupt ID
+                self._session.issue_request(f"interrupt-{uuid.uuid4().hex[:8]}")
+
             t1 = time.perf_counter()
             latency_ms = (t1 - t0) * 1000.0
 
@@ -405,6 +417,7 @@ class VoiceAudioPipeline:
         self,
         participant_id: Optional[str] = None,
         transcript: str = "",
+        request_id: Optional[str] = None,
     ) -> None:
         """
         Executes turn lifecycle:
@@ -420,6 +433,7 @@ class VoiceAudioPipeline:
                     "tool-pending",
                     participant_id=participant_id,
                     transcript=transcript,
+                    request_id=request_id,
                 )
                 # Yield control briefly so a rapid interrupt before tool execution can trigger cleanly
                 await asyncio.sleep(0.01)
@@ -429,6 +443,7 @@ class VoiceAudioPipeline:
                     "tool-start",
                     participant_id=participant_id,
                     transcript=transcript,
+                    request_id=request_id,
                 )
                 tool_result = await self.tool_executor(transcript)
 
@@ -437,7 +452,23 @@ class VoiceAudioPipeline:
                     "tool-result",
                     participant_id=participant_id,
                     result=tool_result,
+                    request_id=request_id,
                 )
+                
+                if self._session is not None and request_id is not None:
+                    # Single explicit fencing gate through orchestrator logic
+                    fenced_result = self._session.resolve(request_id, tool_result)
+                    if fenced_result is None:
+                        # Session already logged the stale-result-discarded event
+                        self._transition_to(
+                            PipelineState.LISTENING,
+                            "tool-result-stale",
+                            participant_id=participant_id,
+                            request_id=request_id,
+                        )
+                        return
+                    tool_result = fenced_result
+
                 response_text = f"Tool result: {tool_result}"
                 # Yield control so an interrupt after tool result but before TTS speaking can trigger cleanly
                 await asyncio.sleep(0.05)
@@ -449,6 +480,7 @@ class VoiceAudioPipeline:
                 participant_id=participant_id,
                 text=response_text,
                 tts_provider=self.active_tts_provider,
+                request_id=request_id,
             )
             self.is_tts_active = True
             synth_stream = self.tts.synthesize(response_text)
@@ -466,6 +498,7 @@ class VoiceAudioPipeline:
                 text=response_text,
                 frame_count=frame_count,
                 tts_provider=self.active_tts_provider,
+                request_id=request_id,
             )
         except asyncio.CancelledError:
             self.is_tts_active = False
@@ -478,11 +511,12 @@ class VoiceAudioPipeline:
                 "error",
                 participant_id=participant_id,
                 error=str(e),
+                request_id=request_id,
             )
 
-    async def speak_test_response(self, participant_id: Optional[str] = None, transcript: str = "") -> None:
+    async def speak_test_response(self, participant_id: Optional[str] = None, transcript: str = "", request_id: Optional[str] = None) -> None:
         """Direct invocation helper that executes turn response and awaits completion."""
-        await self._execute_turn_response(participant_id=participant_id, transcript=transcript)
+        await self._execute_turn_response(participant_id=participant_id, transcript=transcript, request_id=request_id)
 
     async def wait_for_tts(self) -> None:
         """Wait for the active response / TTS task to finish if executing."""
@@ -566,10 +600,14 @@ class VoiceAudioPipeline:
                     # Cancel any prior lingering response task
                     if self._current_response_task and not self._current_response_task.done():
                         self._current_response_task.cancel()
+                        
+                    request_id = f"utt-{uuid.uuid4().hex[:12]}"
+                    if self._session:
+                        request_id = self._session.issue_request(request_id)
 
                     # Launch managed turn response asynchronously
                     self._current_response_task = asyncio.create_task(
-                        self._execute_turn_response(participant_id=participant_id)
+                        self._execute_turn_response(participant_id=participant_id, request_id=request_id)
                     )
 
     async def handle_participant_track(

@@ -4,6 +4,7 @@ __pycache__/
 .env
 logs/
 /logs/
+harness_report.txt
 dist/
 build/
 *.egg-info/

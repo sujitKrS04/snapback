@@ -27,6 +27,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from livekit import rtc
 from livekit.agents import stt, tts
+import livekit.plugins.rime.models
+import livekit.plugins.rime.langs
 
 from agent import (
     PipelineState,
@@ -35,6 +37,7 @@ from agent import (
     create_tts_provider,
     log_stage,
 )
+from orchestrator import SessionStateManager
 
 
 class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
@@ -121,13 +124,13 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
             stt.SpeechEvent(
                 type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
                 request_id="1",
-                alternatives=[stt.SpeechData(text="hello", language="en")],
+                alternatives=[stt.SpeechData(text="hello", language="en")],  # type: ignore
                 created_at=0.0,
             ),
             stt.SpeechEvent(
                 type=stt.SpeechEventType.FINAL_TRANSCRIPT,
                 request_id="1",
-                alternatives=[stt.SpeechData(text="hello world", language="en")],
+                alternatives=[stt.SpeechData(text="hello world", language="en")],  # type: ignore
                 created_at=0.0,
             ),
             stt.SpeechEvent(
@@ -142,7 +145,7 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
         original_stdout = sys.stdout
         try:
             sys.stdout = captured_stdout
-            await pipeline.process_stt_events(MockSTTStream(events), participant_id="participant-42")
+            await pipeline.process_stt_events(MockSTTStream(events), participant_id="participant-42")  # type: ignore
             await pipeline.wait_for_tts()
         finally:
             sys.stdout = original_stdout
@@ -229,13 +232,13 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
                 yield stt.SpeechEvent(
                     type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
                     request_id="rt",
-                    alternatives=[stt.SpeechData(text="testing full round trip", language="en")],
+                    alternatives=[stt.SpeechData(text="testing full round trip", language="en")],  # type: ignore
                     created_at=0.0,
                 )
                 yield stt.SpeechEvent(
                     type=stt.SpeechEventType.FINAL_TRANSCRIPT,
                     request_id="rt",
-                    alternatives=[stt.SpeechData(text="testing full round trip audio", language="en")],
+                    alternatives=[stt.SpeechData(text="testing full round trip audio", language="en")],  # type: ignore
                     created_at=0.0,
                 )
                 yield stt.SpeechEvent(
@@ -249,7 +252,7 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
         orig_stdout = sys.stdout
         try:
             sys.stdout = captured_stdout
-            await pipeline.process_stt_events(MockStream(), participant_id="roundtrip-tester")
+            await pipeline.process_stt_events(MockStream(), participant_id="roundtrip-tester")  # type: ignore
             await pipeline.wait_for_tts()
         finally:
             sys.stdout = orig_stdout
@@ -313,13 +316,13 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
                 yield stt.SpeechEvent(
                     type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
                     request_id="bargein",
-                    alternatives=[stt.SpeechData(text="wait stop", language="en")],
+                    alternatives=[stt.SpeechData(text="wait stop", language="en")],  # type: ignore
                     created_at=0.0,
                 )
                 yield stt.SpeechEvent(
                     type=stt.SpeechEventType.FINAL_TRANSCRIPT,
                     request_id="bargein",
-                    alternatives=[stt.SpeechData(text="wait stop I have a question", language="en")],
+                    alternatives=[stt.SpeechData(text="wait stop I have a question", language="en")],  # type: ignore
                     created_at=0.0,
                 )
                 yield stt.SpeechEvent(
@@ -333,7 +336,7 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
         orig_stdout = sys.stdout
         try:
             sys.stdout = captured_stdout
-            await pipeline.process_stt_events(InterruptionStream(), participant_id="bargein-user")
+            await pipeline.process_stt_events(InterruptionStream(), participant_id="bargein-user")  # type: ignore
             await pipeline.wait_for_tts()
         finally:
             sys.stdout = orig_stdout
@@ -576,7 +579,7 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
                 yield stt.SpeechEvent(
                     type=stt.SpeechEventType.FINAL_TRANSCRIPT,
                     request_id="tl",
-                    alternatives=[stt.SpeechData(text="timeline test", language="en")],
+                    alternatives=[stt.SpeechData(text="timeline test", language="en")],  # type: ignore
                     created_at=0.0,
                 )
                 yield stt.SpeechEvent(
@@ -590,7 +593,7 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
         orig = sys.stdout
         try:
             sys.stdout = captured_stdout
-            await pipeline.process_stt_events(TimelineSpeechStream(), participant_id="timeline-user")
+            await pipeline.process_stt_events(TimelineSpeechStream(), participant_id="timeline-user")  # type: ignore
             await pipeline.wait_for_tts()
         finally:
             sys.stdout = orig
@@ -647,10 +650,10 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(name_http, "rime")
         self.assertEqual(rate_http, 22050)
-        self.assertEqual(rime_http._opts.model, "coda")
-        self.assertEqual(rime_http._opts.speaker, "celeste")
-        self.assertEqual(rime_http._opts.coda_options.lang, "eng")
-        self.assertEqual(rime_http._base_url, "https://users.rime.ai/v1/rime-tts")
+        self.assertEqual(rime_http._opts.model, "coda")  # type: ignore
+        self.assertEqual(rime_http._opts.speaker, "celeste")  # type: ignore
+        self.assertEqual(rime_http._opts.coda_options.lang, "eng")  # type: ignore
+        self.assertEqual(rime_http._base_url, "https://users.rime.ai/v1/rime-tts")  # type: ignore
         self.assertFalse(rime_http.capabilities.streaming)
 
         # 4. Verify WebSocket transport configuration
@@ -659,12 +662,166 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(name_ws, "rime")
         self.assertEqual(rate_ws, 22050)
-        self.assertEqual(rime_ws._opts.model, "coda")
-        self.assertEqual(rime_ws._opts.speaker, "celeste")
-        self.assertEqual(rime_ws._opts.coda_options.lang, "eng")
-        self.assertEqual(rime_ws._base_url, "wss://users-ws.rime.ai")
+        self.assertEqual(rime_ws._opts.model, "coda")  # type: ignore
+        self.assertEqual(rime_ws._opts.speaker, "celeste")  # type: ignore
+        self.assertEqual(rime_ws._opts.coda_options.lang, "eng")  # type: ignore
+        self.assertEqual(rime_ws._base_url, "wss://users-ws.rime.ai")  # type: ignore
         self.assertTrue(rime_ws.capabilities.streaming)
 
+
+class TestAgentSessionFencing(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.mkdtemp()
+        self.log_file = Path(self.temp_dir) / "agent.log"
+        self.session = SessionStateManager(log_file=str(self.log_file))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_interrupt_routes_through_session_resolve(self) -> None:
+        """Verify that when an interrupt fires mid-tool, the tool result is gated by session.resolve()."""
+        mock_audio_source = MagicMock(spec=rtc.AudioSource)
+        mock_audio_source.capture_frame = AsyncMock()
+        mock_tts = MagicMock()
+        
+        async def dummy_tool(transcript: str) -> str:
+            await asyncio.sleep(0.1)
+            return "tool result"
+            
+        pipeline = VoiceAudioPipeline(
+            audio_source=mock_audio_source,
+            tts_instance=mock_tts,
+            active_tts_provider="rime",
+            tool_executor=dummy_tool,
+            log_file_override=str(self.log_file),
+            session=self.session,
+        )
+        
+        req_id = self.session.issue_request("req-1")
+        
+        # Start turn response
+        task = asyncio.create_task(pipeline._execute_turn_response(participant_id="p1", transcript="test", request_id=req_id))
+        
+        # Let it reach TOOL_RUNNING
+        await asyncio.sleep(0.05)
+        self.assertEqual(pipeline.state, PipelineState.TOOL_RUNNING)
+        
+        # Fire interrupt
+        await pipeline.cancel_active(participant_id="p1")
+        
+        # Wait for task to finish
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+            
+        self.assertEqual(pipeline.state, PipelineState.LISTENING)
+        self.assertTrue(self.session.is_stale(req_id))
+
+    async def test_agent_never_discards_without_session(self) -> None:
+        """Verify that a pipeline with session=None still cancels correctly without routing through SessionStateManager."""
+        mock_audio_source = MagicMock(spec=rtc.AudioSource)
+        mock_audio_source.capture_frame = AsyncMock()
+        mock_tts = MagicMock()
+        
+        async def dummy_tool(transcript: str) -> str:
+            await asyncio.sleep(0.1)
+            return "tool result"
+            
+        pipeline = VoiceAudioPipeline(
+            audio_source=mock_audio_source,
+            tts_instance=mock_tts,
+            active_tts_provider="rime",
+            tool_executor=dummy_tool,
+            log_file_override=str(self.log_file),
+            session=None,  # No session manager
+        )
+        
+        task = asyncio.create_task(pipeline._execute_turn_response(participant_id="p1", transcript="test"))
+        pipeline._current_response_task = task
+        
+        await asyncio.sleep(0.05)
+        self.assertEqual(pipeline.state, PipelineState.TOOL_RUNNING)
+        
+        await pipeline.cancel_active(participant_id="p1")
+        
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+            
+        self.assertEqual(pipeline.state, PipelineState.LISTENING)
+
+    async def test_stale_result_logged_to_agent_log(self) -> None:
+        """Run tool -> interrupt -> tool-result-arrives sequence; asserts stale-result-discarded in log."""
+        mock_audio_source = MagicMock(spec=rtc.AudioSource)
+        mock_audio_source.capture_frame = AsyncMock()
+        mock_tts = MagicMock()
+        
+        async def dummy_tool(transcript: str) -> str:
+            # We don't cancel this explicitly in the test to simulate it arriving late
+            return "tool result"
+            
+        pipeline = VoiceAudioPipeline(
+            audio_source=mock_audio_source,
+            tts_instance=mock_tts,
+            active_tts_provider="rime",
+            tool_executor=dummy_tool,
+            log_file_override=str(self.log_file),
+            session=self.session,
+        )
+        
+        req_id = self.session.issue_request("req-1")
+        
+        # Immediately set a new request ID to make req-1 stale
+        new_id = self.session.issue_request("req-2")
+        
+        # Run the turn response for the now-stale req-1
+        await pipeline._execute_turn_response(participant_id="p1", transcript="test", request_id=req_id)
+        
+        # It should have discarded the result and gone back to LISTENING
+        self.assertEqual(pipeline.state, PipelineState.LISTENING)
+        
+        with open(self.log_file, "r", encoding="utf-8") as f:
+            lines = [json.loads(line.strip()) for line in f if line.strip()]
+            
+        stale_events = [l for l in lines if l.get("stage") == "stale-result-discarded" or l.get("event") == "stale-result-discarded"]
+        self.assertEqual(len(stale_events), 1)
+        self.assertEqual(stale_events[0]["discarded_request_id"], "req-1")
+        self.assertEqual(stale_events[0]["current_request_id"], "req-2")
+
+    async def test_fresh_result_reaches_tts(self) -> None:
+        """With no interrupt, session.resolve() returns the result and TTS proceeds."""
+        mock_audio_source = MagicMock(spec=rtc.AudioSource)
+        mock_audio_source.capture_frame = AsyncMock()
+        mock_tts = MagicMock()
+        mock_tts.synthesize = MagicMock(return_value=AsyncMock()) # Returns empty async generator for simplicity
+        
+        async def dummy_tool(transcript: str) -> str:
+            return "tool result"
+            
+        pipeline = VoiceAudioPipeline(
+            audio_source=mock_audio_source,
+            tts_instance=mock_tts,
+            active_tts_provider="rime",
+            tool_executor=dummy_tool,
+            log_file_override=str(self.log_file),
+            session=self.session,
+        )
+        
+        req_id = self.session.issue_request("req-1")
+        
+        await pipeline._execute_turn_response(participant_id="p1", transcript="test", request_id=req_id)
+        
+        # Since it wasn't stale, it should have proceeded to TTS_SPEAKING and then IDLE
+        self.assertEqual(pipeline.state, PipelineState.IDLE)
+        
+        with open(self.log_file, "r", encoding="utf-8") as f:
+            lines = [json.loads(line.strip()) for line in f if line.strip()]
+            
+        stages = [l["stage"] for l in lines]
+        self.assertIn("tts-start", stages)
+        self.assertNotIn("stale-result-discarded", stages)
 
 if __name__ == "__main__":
     unittest.main()
