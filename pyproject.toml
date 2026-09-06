@@ -1,0 +1,11 @@
+[tool.pyrefly]
+# Suppress false positives from Pyrefly trying to parse docstring prose as Python code.
+# All __pyrefly_virtual__ inmemory errors come from English-language docstrings in
+# orchestrator.py and are not real code problems.
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
