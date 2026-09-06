@@ -1,0 +1,203 @@
+@import "tailwindcss";
+
+/* ---------- theme tokens ---------- */
+:root {
+  /* state semantics */
+  --state-idle: #6b7280;
+  --state-listening: #e8a838;
+  --state-speaking: #f59e0b;
+  --state-interrupted: #dc2626;
+  --state-processing: #6b7280;
+
+  /* dark palette (default) */
+  --bg-primary: #0c0c10;
+  --bg-surface: #16161a;
+  --bg-surface-hover: #1e1e26;
+  --bg-surface-active: #26262e;
+  --text-primary: #fafaf9;
+  --text-secondary: #a1a1aa;
+  --text-tertiary: #71717a;
+  --border-color: #27272a;
+  --accent: #c9973e;
+  --accent-hover: #d4a843;
+  --accent-soft: rgba(201, 151, 62, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.5);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.6);
+  --overlay-bg: rgba(12,12,16,0.7);
+  --scrollbar-track: #16161a;
+  --scrollbar-thumb: #27272a;
+}
+
+[data-theme="light"] {
+  --state-idle: #78716c;
+  --state-listening: #b4892f;
+  --state-speaking: #d97706;
+  --state-interrupted: #dc2626;
+  --state-processing: #78716c;
+
+  --bg-primary: #fafaf9;
+  --bg-surface: #ffffff;
+  --bg-surface-hover: #f4f4f5;
+  --bg-surface-active: #e4e4e7;
+  --text-primary: #1c1917;
+  --text-secondary: #57534e;
+  --text-tertiary: #a8a29e;
+  --border-color: #e7e5e4;
+  --accent: #a8792a;
+  --accent-hover: #92641f;
+  --accent-soft: rgba(168, 121, 42, 0.1);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.1);
+  --overlay-bg: rgba(250,250,249,0.8);
+  --scrollbar-track: #f4f4f5;
+  --scrollbar-thumb: #d4d4d8;
+}
+
+/* ---------- reset & base ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "DM Sans", system-ui, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background 0.4s ease, color 0.4s ease;
+}
+
+#root {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- typography ---------- */
+.font-display {
+  font-family: "Sora", system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* ---------- layout helpers ---------- */
+.scrollbar-thin::-webkit-scrollbar { width: 4px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+
+/* ---------- micro-interactions ---------- */
+.btn-press {
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.15s ease;
+}
+.btn-press:active {
+  transform: scale(0.96);
+}
+
+.panel-slide {
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease;
+}
+
+/* ---------- waveform interrupt ripple ---------- */
+@keyframes waveSnap {
+  0%   { transform: scaleX(1); }
+  20%  { transform: scaleX(1.06); }
+  100% { transform: scaleX(1); }
+}
+.wave-snap {
+  animation: waveSnap 0.45s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes rippleOut {
+  0%   { opacity: 0.5; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.8); }
+}
+.wave-ripple {
+  animation: rippleOut 0.6s ease-out forwards;
+}
+
+/* ---------- loading choreography ---------- */
+@keyframes choreoPulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1.05); }
+}
+@keyframes choreoRing {
+  0%   { transform: scale(0.9); opacity: 0.4; }
+  50%  { transform: scale(1.1); opacity: 0.1; }
+  100% { transform: scale(0.9); opacity: 0.4; }
+}
+.choreo-pulse { animation: choreoPulse 1.6s ease-in-out infinite; }
+.choreo-ring   { animation: choreoRing 1.6s ease-in-out infinite; }
+
+/* ---------- responsive 375px ---------- */
+@media (max-width: 375px) {
+  .responsive-text { font-size: 0.8125rem; }
+  .responsive-gap { gap: 0.5rem; }
+  .responsive-py { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+  .responsive-px { padding-left: 0.75rem; padding-right: 0.75rem; }
+}
+
+/* ---------- theme toggle ---------- */
+.theme-toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  background: var(--border-color);
+  border: none;
+  cursor: pointer;
+  transition: background 0.3s ease;
+  padding: 0;
+}
+.theme-toggle::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: var(--shadow-sm);
+}
+[data-theme="light"] .theme-toggle { background: var(--accent); }
+[data-theme="light"] .theme-toggle::after { transform: translateX(20px); }
+
+/* provider badge */
+.provider-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.provider-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: choreoPulse 2s ease-in-out infinite;
+}
+
+/* latency readout */
+.latency-readout {
+  font-family: "Sora", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+/* interrupt snap flash on waveform */
+@keyframes snapFlash {
+  0%   { background-color: rgba(220, 38, 38, 0.15); }
+  100% { background-color: transparent; }
+}
+.waveform-snap-flash {
+  animation: snapFlash 0.5s ease-out forwards;
+}

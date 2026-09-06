@@ -248,6 +248,9 @@ class VoiceAudioPipeline:
         tool_executor: Optional[Callable[[str], Awaitable[str]]] = None,
         run_id: Optional[str] = None,
         session: Optional[SessionStateManager] = None,
+        on_transition: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
+        on_interrupt: Optional[Callable[[], Awaitable[None]]] = None,
+        on_transcript: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ) -> None:
         self.audio_source = audio_source
         self.active_tts_provider = active_tts_provider or os.getenv("TTS_PROVIDER", "rime")
@@ -262,6 +265,9 @@ class VoiceAudioPipeline:
         self.test_sentence = test_sentence or os.getenv("TEST_SENTENCE", DEFAULT_HARDCODED_SENTENCE)
         self.log_file_override = log_file_override
         self.tool_executor = tool_executor
+        self.on_transition = on_transition
+        self.on_interrupt = on_interrupt
+        self.on_transcript = on_transcript
 
         self.logger = StructuredTimelineLogger(run_id=run_id, default_log_path=log_file_override)
         self._session = session
@@ -324,7 +330,7 @@ class VoiceAudioPipeline:
         """Transition pipeline state and record in structured timeline log."""
         prev = self.state
         self.state = new_state
-        return self.logger.log(
+        record = self.logger.log(
             stage=stage,
             state=new_state,
             previous_state=prev,
@@ -332,6 +338,22 @@ class VoiceAudioPipeline:
             log_file_override=self.log_file_override,
             **kwargs,
         )
+        if self.on_transition:
+            self._schedule_callback(self.on_transition(stage, prev.value, new_state.value))
+        return record
+
+    def _schedule_callback(self, coro: Awaitable[None]) -> None:
+        """Schedule an async callback without awaiting; swallows errors in logs."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not schedule pipeline callback")
+
+    async def _fire_interrupt(self) -> None:
+        """Fire the interrupt callback if registered."""
+        if self.on_interrupt:
+            await self.on_interrupt()
 
     async def cancel_active(self, participant_id: Optional[str] = None) -> Optional[float]:
         """
@@ -357,6 +379,9 @@ class VoiceAudioPipeline:
                 interruption_count=self.interruption_count,
                 log_file_override=self.log_file_override,
             )
+
+            if self.on_interrupt:
+                self._schedule_callback(self.on_interrupt())
 
             # Cancel in-flight response/tool/TTS task
             task_to_cancel = self._current_response_task
@@ -580,6 +605,8 @@ class VoiceAudioPipeline:
                     interim = " ".join(alt_texts)
                     sys.stdout.write(f"\r[Deepgram ASR Interim] {interim}")
                     sys.stdout.flush()
+                    if self.on_transcript:
+                        await self.on_transcript("user", interim)
 
             elif event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                 alt_texts = [alt.text for alt in event.alternatives if alt.text]
@@ -587,6 +614,8 @@ class VoiceAudioPipeline:
                     final_text = " ".join(alt_texts)
                     sys.stdout.write(f"\n[Deepgram ASR Final] {final_text}\n")
                     sys.stdout.flush()
+                    if self.on_transcript:
+                        await self.on_transcript("user", final_text)
 
             elif event.type == stt.SpeechEventType.END_OF_SPEECH:
                 if self.is_speaking:
@@ -667,6 +696,47 @@ async def entrypoint(ctx: JobContext) -> None:
         tts_instance=tts_instance,
         active_tts_provider=active_provider,
     )
+
+    _PIPELINE_TO_UI_STATE: dict[PipelineState, str] = {
+        PipelineState.IDLE: "idle",
+        PipelineState.LISTENING: "listening",
+        PipelineState.TOOL_PENDING: "listening",
+        PipelineState.TOOL_RUNNING: "listening",
+        PipelineState.TOOL_COMPLETED: "listening",
+        PipelineState.TTS_SPEAKING: "speaking",
+    }
+
+    async def send_data_message(payload: dict[str, Any]) -> None:
+        try:
+            await ctx.room.local_participant.publish_data(
+                data=json.dumps(payload).encode("utf-8"),
+                topic="snapback",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not publish data message: {e}")
+
+    async def on_transition(stage: str, previous_state: str, new_state: str) -> None:
+        for pipeline_state, ui_state in _PIPELINE_TO_UI_STATE.items():
+            if pipeline_state.value == new_state:
+                await send_data_message(
+                    {
+                        "type": "state_update",
+                        "state": ui_state,
+                        "stage": stage,
+                        "previous_state": previous_state,
+                    }
+                )
+                break
+
+    async def on_interrupt() -> None:
+        await send_data_message({"type": "state_update", "state": "interrupted"})
+
+    async def on_transcript(speaker: str, text: str) -> None:
+        await send_data_message({"type": "transcript", "speaker": speaker, "text": text})
+
+    pipeline.on_transition = on_transition
+    pipeline.on_interrupt = on_interrupt
+    pipeline.on_transcript = on_transcript
 
     active_tasks: set[asyncio.Task] = set()
 

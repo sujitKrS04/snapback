@@ -23,8 +23,10 @@ from typing import Any, Optional
 import uuid
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from livekit.api import AccessToken, VideoGrants
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -41,6 +43,30 @@ _LOG_CANDIDATES: list[Path] = [
     Path("/logs/backend.log"),
     Path(BACKEND_LOG_PATH),
 ]
+
+# Candidate agent timeline log paths (the structured JSONL the agent writes)
+AGENT_LOG_OVERRIDE: str = os.getenv("LOG_FILE_PATH", "logs/agent.log")
+_AGENT_LOG_CANDIDATES: list[Path] = [
+    Path(AGENT_LOG_OVERRIDE),
+    Path("logs/agent.log"),
+    Path("/logs/agent.log"),
+]
+
+
+def _agent_log_candidates() -> list[Path]:
+    """Deduplicate agent log candidate paths by resolved location."""
+    seen: set[str] = set()
+    out: list[Path] = []
+    for raw in _AGENT_LOG_CANDIDATES:
+        try:
+            key = str(raw.resolve())
+        except Exception:
+            key = str(raw)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(raw)
+    return out
 
 # Pre-generated deterministic slots (not random so responses are stable)
 _AVAILABLE_SLOTS: list[str] = ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]
@@ -142,14 +168,32 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class TokenRequest(BaseModel):
+    room: str = Field(..., description="LiveKit room name")
+    identity: str = Field(..., description="Participant identity")
+
+
+class TokenResponse(BaseModel):
+    token: str
+    url: str
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="Snapback Booking Backend",
-    description="FastAPI backend providing appointment availability and booking endpoints.",
+    description="FastAPI backend providing appointment availability, booking, and LiveKit token endpoints.",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -254,6 +298,191 @@ async def book(body: BookRequest) -> BookResponse:
     )
 
     return response_data
+
+
+@app.post("/token", response_model=TokenResponse, tags=["livekit"])
+async def get_token(body: TokenRequest) -> TokenResponse:
+    """Issue a LiveKit access token for the given room and identity."""
+    api_key = os.getenv("LIVEKIT_API_KEY", "")
+    api_secret = os.getenv("LIVEKIT_API_SECRET", "")
+    url = os.getenv("LIVEKIT_URL", "wss://your-project.livekit.cloud")
+
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
+
+    grant = VideoGrants(
+        room_join=True,
+        room=body.room,
+        can_publish=True,
+        can_subscribe=True,
+        can_publish_data=True,
+    )
+    token = (
+        AccessToken(api_key=api_key, api_secret=api_secret)
+        .with_identity(body.identity)
+        .with_grants(grant)
+        .to_jwt()
+    )
+
+    _log_event(
+        "token_issued",
+        request_id=f"tok-{uuid.uuid4().hex[:8]}",
+        endpoint="/token",
+        method="POST",
+        payload={"room": body.room, "identity": body.identity},
+    )
+    return TokenResponse(token=token, url=url)
+
+
+@app.get("/events", tags=["realtime"])
+async def stream_agent_events(tail: int = 300) -> StreamingResponse:
+    """
+    Server-Sent Events stream of the agent's structured timeline log.
+
+    Emits each new JSON line from logs/agent.log (and candidate mirrors) as an
+    SSE ``data:`` frame. On connect, replays the most recent *tail* lines so the
+    client can rebuild history. Out-of-order / duplicate events are filtered
+    server-side using the per-run monotonic ``seq`` field.
+
+    Event payload schema (one JSON object per line):
+        {timestamp, seq, run_id, stage, state, previous_state,
+         active_tts_provider, request_id, latency_ms}
+    """
+
+    async def event_generator() -> Any:
+        # run_id -> highest seq already streamed (out-of-order/duplicate filter)
+        seen_seq: dict[str, int] = {}
+        # exact-line hash set for events without run_id/seq
+        seen_flat: set[str] = set()
+        # path -> byte offset we have consumed up to
+        positions: dict[Path, int] = {}
+        emitted = 0
+        last_activity = time.monotonic()
+
+        while True:
+            produced = False
+            for path in _agent_log_candidates():
+                if not path.exists():
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+
+                if path not in positions:
+                    # First sighting: replay the most recent *tail* complete
+                    # lines of history, then continue live below. We read a
+                    # generous window (per-line budget covers long transcript
+                    # text) and keep exactly the last `tail` lines so a line is
+                    # never sliced in half. tail=0 replays nothing.
+                    size = stat.st_size
+                    if size <= 0:
+                        positions[path] = 0
+                        continue
+                    window_bytes = min(size, max(tail, emitted) * 4096 + 8192)
+                    start = max(0, size - window_bytes)
+                    if start > 0:
+                        # Align the window start to a line boundary.
+                        probe_start = max(0, start - 65536)
+                        try:
+                            with open(path, "rb") as fh:
+                                fh.seek(probe_start)
+                                probe = fh.read(start - probe_start)
+                            nl = probe.rfind(b"\n")
+                            if nl != -1:
+                                start = probe_start + nl + 1
+                        except OSError:
+                            pass
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                            fh.seek(start)
+                            chunk = fh.read()
+                            new_pos = fh.tell()
+                    except OSError:
+                        continue
+                    positions[path] = new_pos
+
+                    for raw in (chunk.splitlines()[-tail:] if tail > 0 else []):
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            ev = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+
+                        run_id = ev.get("run_id")
+                        seq = ev.get("seq")
+                        if isinstance(run_id, str) and isinstance(seq, int):
+                            last = seen_seq.get(run_id, -1)
+                            if seq <= last:
+                                continue
+                            seen_seq[run_id] = seq
+                        else:
+                            digest = raw
+                            if digest in seen_flat:
+                                continue
+                            seen_flat.add(digest)
+
+                        yield f"data: {raw}\n\n"
+                        emitted += 1
+                        produced = True
+                    continue
+
+                pos = positions[path]
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                        fh.seek(pos)
+                        chunk = fh.read()
+                        new_pos = fh.tell()
+                except OSError:
+                    continue
+                if new_pos <= pos:
+                    continue
+                positions[path] = new_pos
+
+                for raw in chunk.splitlines():
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        ev = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    run_id = ev.get("run_id")
+                    seq = ev.get("seq")
+                    if isinstance(run_id, str) and isinstance(seq, int):
+                        last = seen_seq.get(run_id, -1)
+                        if seq <= last:
+                            continue
+                        seen_seq[run_id] = seq
+                    else:
+                        digest = raw
+                        if digest in seen_flat:
+                            continue
+                        seen_flat.add(digest)
+
+                    yield f"data: {raw}\n\n"
+                    emitted += 1
+                    produced = True
+
+            if produced:
+                last_activity = time.monotonic()
+            elif time.monotonic() - last_activity > 0.5:
+                yield ": ping\n\n"
+                last_activity = time.monotonic()
+            await asyncio.sleep(0.02)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

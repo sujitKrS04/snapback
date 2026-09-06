@@ -822,3 +822,106 @@ class TestAgentOrchestrationIntegration:
         assert stale_events[0]["discarded_request_id"] == req_1
         # It was stale against whatever the current request was when it finally resolved
         assert stale_events[0]["current_request_id"] == req_2
+
+
+# ===========================================================================
+# Backend — /events SSE tail replay
+# ===========================================================================
+
+
+class TestRealtimeEventStream:
+    """Regression coverage for the /events SSE endpoint's history replay.
+
+    The original implementation estimated the replay window in bytes
+    (~256 bytes/line), which could slice the first line in half whenever a
+    session's log was slightly larger than the byte budget — silently dropping
+    that event (partial JSON failed to parse). The fixed implementation reads
+    a generous window and keeps exactly the last *tail* complete lines.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _agent_log(self, tmp_path: Path, monkeypatch):
+        import backend as backend_mod
+
+        agent_log = tmp_path / "agent.log"
+        monkeypatch.setattr(backend_mod, "_AGENT_LOG_CANDIDATES", [agent_log])
+        return agent_log
+
+    @staticmethod
+    def _write(lines: int, path: Path, pad: int = 700) -> None:
+        """Write `lines` agent-log style events, each padded to `pad` chars so
+        the total file size exceeds any small byte-window estimate."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for i in range(1, lines + 1):
+                fh.write(
+                    json.dumps(
+                        {
+                            "timestamp": "2026-09-06T20:12:31.000000+00:00",
+                            "seq": i,
+                            "run_id": "run-replay-test",
+                            "stage": f"stage-{i}",
+                            "state": "idle",
+                            "previous_state": "idle",
+                            "padding": "x" * pad,
+                        }
+                    )
+                    + "\n"
+                )
+
+    @staticmethod
+    async def _read_events(tail: int, expected: int, timeout: float = 1.5) -> list[dict]:
+        """Open the /events response and collect up to `expected` SSE data events.
+        The stream never ends (live follow), so we rely on a timeout marker."""
+        from backend import stream_agent_events
+
+        events: list[dict] = []
+        resp = await stream_agent_events(tail=tail)
+
+        async def collect() -> None:
+            async for chunk in resp.body_iterator:
+                if len(events) >= expected:
+                    break
+                text = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                for line in text.splitlines():
+                    if line.startswith("data: "):
+                        events.append(json.loads(line[6:]))
+
+        with pytest.MonkeyPatch.context() as _mp:
+            try:
+                await asyncio.wait_for(collect(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass  # live-follow stream: no new data within the window is expected
+        return events
+
+    @pytest.mark.asyncio
+    async def test_replay_does_not_slice_first_line(self, _agent_log: Path) -> None:
+        """8 padded lines, tail=5: exactly events 4..8 must come back whole."""
+        self._write(8, _agent_log, pad=700)
+        events = await self._read_events(tail=5, expected=5)
+        assert len(events) == 5
+        assert [e["seq"] for e in events] == [4, 5, 6, 7, 8]
+
+    @pytest.mark.asyncio
+    async def test_replay_respects_tail_boundary(self, _agent_log: Path) -> None:
+        """tail respects line boundaries: 4 lines, tail=5 replays all 4."""
+        self._write(4, _agent_log, pad=700)
+        events = await self._read_events(tail=5, expected=4)
+        assert len(events) == 4
+        assert [e["seq"] for e in events] == [1, 2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_tail_zero_replays_nothing(self, _agent_log: Path) -> None:
+        """tail=0 is the live-only mode: existing history must not replay."""
+        self._write(6, _agent_log, pad=700)
+        events = await self._read_events(tail=0, expected=1, timeout=1.0)
+        assert events == [], "tail=0 must not replay existing history"
+
+    @pytest.mark.asyncio
+    async def test_run_id_and_seq_preserved(self, _agent_log: Path) -> None:
+        """Replayed events keep their run_id/seq so client dedup stays intact."""
+        self._write(3, _agent_log, pad=700)
+        events = await self._read_events(tail=3, expected=3)
+        assert len(events) == 3
+        assert all(e["run_id"] == "run-replay-test" for e in events)
+        assert [e["seq"] for e in events] == [1, 2, 3]
