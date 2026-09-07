@@ -291,6 +291,9 @@ class VoiceAudioPipeline:
         # Tasks and concurrency management
         self._current_response_task: Optional[asyncio.Task] = None
         self._cancel_lock = asyncio.Lock()
+        self._final_transcript_event = asyncio.Event()
+        self._current_utterance_transcript: Optional[str] = None
+        self._last_final_transcript: Optional[str] = None
 
     @property
     def status(self) -> dict[str, Any]:
@@ -587,8 +590,9 @@ class VoiceAudioPipeline:
                         "speech-start",
                         participant_id=participant_id,
                     )
-                # Reset per-utterance transcript accumulator so interim or stale transcripts never trigger execution
+                # Reset per-utterance transcript accumulator and clear event
                 self._current_utterance_transcript = None
+                self._final_transcript_event.clear()
 
             elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
                 # Interruption guard in case START_OF_SPEECH was missed
@@ -621,12 +625,33 @@ class VoiceAudioPipeline:
                 if alt_texts:
                     final_text = " ".join(alt_texts).strip()
                     if final_text:
-                        self._current_utterance_transcript = final_text
-                        self._last_final_transcript = final_text
-                        sys.stdout.write(f"\n[Deepgram ASR Final] {final_text}\n")
+                        if self._current_utterance_transcript:
+                            self._current_utterance_transcript = f"{self._current_utterance_transcript} {final_text}".strip()
+                        else:
+                            self._current_utterance_transcript = final_text
+                        self._last_final_transcript = self._current_utterance_transcript
+                        self._final_transcript_event.set()
+                        sys.stdout.write(f"\n[Deepgram ASR Final] {self._current_utterance_transcript}\n")
                         sys.stdout.flush()
                         if self.on_transcript:
                             await self.on_transcript("user", final_text)
+
+                        # If speech already ended and agent is currently idle, trigger turn response immediately
+                        if not self.is_speaking and self.state == PipelineState.IDLE:
+                            if self._current_response_task is None or self._current_response_task.done():
+                                current_tx = self._current_utterance_transcript
+                                self._current_utterance_transcript = None
+                                if current_tx and current_tx.strip():
+                                    request_id = f"utt-{uuid.uuid4().hex[:12]}"
+                                    if self._session:
+                                        request_id = self._session.issue_request(request_id)
+                                    self._current_response_task = asyncio.create_task(
+                                        self._execute_turn_response(
+                                            participant_id=participant_id,
+                                            transcript=current_tx,
+                                            request_id=request_id,
+                                        )
+                                    )
 
             elif event.type == stt.SpeechEventType.END_OF_SPEECH:
                 if self.is_speaking:
@@ -640,6 +665,13 @@ class VoiceAudioPipeline:
                     # Cancel any prior lingering response task
                     if self._current_response_task and not self._current_response_task.done():
                         self._current_response_task.cancel()
+
+                    # If final transcript hasn't arrived yet from Deepgram, give it a grace window
+                    if not getattr(self, "_current_utterance_transcript", None):
+                        try:
+                            await asyncio.wait_for(self._final_transcript_event.wait(), timeout=0.6)
+                        except asyncio.TimeoutError:
+                            pass
 
                     # Strictly require a non-empty final transcript from the current utterance.
                     # Interim transcripts, empty VAD clicks, or stale prior transcripts

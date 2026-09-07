@@ -18,6 +18,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import subprocess
+import sys
 import time
 from typing import Any, Optional
 import uuid
@@ -32,6 +34,31 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 logger = logging.getLogger("snapback-backend")
+
+_agent_process: Optional[subprocess.Popen] = None
+
+
+def _ensure_agent_running() -> bool:
+    """Ensure run_agent.py is running in the background to serve incoming LiveKit calls."""
+    global _agent_process
+    if os.getenv("SNAPBACK_AUTO_SPAWN_AGENT", "true").lower() == "false":
+        return False
+    if _agent_process is not None and _agent_process.poll() is None:
+        return True
+    try:
+        run_agent_script = Path(__file__).parent / "run_agent.py"
+        if run_agent_script.exists():
+            _agent_process = subprocess.Popen(
+                [sys.executable, str(run_agent_script)],
+                cwd=str(Path(__file__).parent.resolve()),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("Auto-spawned agent supervisor process (pid=%s)", _agent_process.pid)
+            return True
+    except Exception as exc:
+        logger.warning("Could not auto-spawn run_agent.py: %s", exc)
+    return False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -333,7 +360,22 @@ async def get_token(body: TokenRequest) -> TokenResponse:
         method="POST",
         payload={"room": body.room, "identity": body.identity},
     )
+
+    # Ensure background voice agent worker is running and attached to room
+    _ensure_agent_running()
+
     return TokenResponse(token=token, url=url)
+
+
+@app.get("/agent-status", tags=["livekit"])
+async def agent_status() -> dict[str, Any]:
+    """Check whether the agent supervisor process is actively running."""
+    global _agent_process
+    is_running = _agent_process is not None and _agent_process.poll() is None
+    return {
+        "agent_running": is_running,
+        "pid": _agent_process.pid if is_running and _agent_process else None,
+    }
 
 
 @app.post("/save-recording", tags=["recording"])

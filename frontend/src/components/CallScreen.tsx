@@ -275,9 +275,17 @@ export function CallScreen({ onReturnToIntro }: CallScreenProps) {
           </span>
 
           {isConnected && (
-            <span className="hidden sm:inline-flex font-mono text-[11px] px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-500 font-semibold">
-              Rime Coda TTS
-            </span>
+            agentTrack ? (
+              <span className="hidden sm:inline-flex items-center gap-1.5 font-mono text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 font-semibold">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                Rime Agent Online
+              </span>
+            ) : (
+              <span className="hidden sm:inline-flex items-center gap-1.5 font-mono text-[11px] px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-500 font-semibold">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
+                Agent Connecting…
+              </span>
+            )
           )}
 
           {/* Record button */}
@@ -329,6 +337,17 @@ export function CallScreen({ onReturnToIntro }: CallScreenProps) {
                 >
                   <span className="w-2 h-2 rounded-full bg-[var(--accent)] animate-ping" />
                   Negotiating WebRTC handshake…
+                </motion.div>
+              )}
+              {isConnected && !agentTrack && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="mt-4 flex items-center gap-2 text-xs font-mono text-amber-500"
+                >
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                  Voice Agent is connecting to room…
                 </motion.div>
               )}
             </AnimatePresence>
