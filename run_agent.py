@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 import sys
 import time
 from typing import Any, Optional
@@ -67,11 +68,45 @@ async def run_agent_loop() -> None:
             await asyncio.sleep(2)
 
 
+PID_FILE = Path("logs/agent.pid")
+
+
+def acquire_singleton_lock() -> bool:
+    """Ensure only one run_agent process runs at any given time."""
+    try:
+        import psutil
+        if PID_FILE.exists():
+            try:
+                old_pid = int(PID_FILE.read_text().strip())
+                if psutil.pid_exists(old_pid) and old_pid != os.getpid():
+                    p = psutil.Process(old_pid)
+                    cmd = " ".join(p.cmdline())
+                    if "run_agent.py" in cmd:
+                        logger.warning("Another run_agent.py is already running (pid=%s). Exiting duplicate process.", old_pid)
+                        return False
+            except Exception:
+                pass
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()))
+        return True
+    except Exception as e:
+        logger.debug(f"Lock check error: {e}")
+        return True
+
+
 def main() -> None:
+    if not acquire_singleton_lock():
+        sys.exit(0)
     try:
         asyncio.run(run_agent_loop())
     except KeyboardInterrupt:
         pass
+    finally:
+        try:
+            if PID_FILE.exists() and int(PID_FILE.read_text().strip()) == os.getpid():
+                PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

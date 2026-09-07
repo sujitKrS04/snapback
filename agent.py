@@ -924,21 +924,31 @@ async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
         except Exception as err:
             logger.debug(f"Error handling data packet: {err}")
 
-    active_tasks: set[asyncio.Task] = set()
-    subscribed_tracks: set[str] = set()
+    active_participant_tasks: dict[str, asyncio.Task] = {}
+
+    def cleanup_participant(identity: str) -> None:
+        task = active_participant_tasks.pop(identity, None)
+        if task and not task.done():
+            logger.info(f"Cancelling audio stream for participant {identity}")
+            task.cancel()
 
     def subscribe_track(track: rtc.Track, participant: rtc.RemoteParticipant) -> None:
         if track.kind == rtc.TrackKind.KIND_AUDIO:
-            track_sid = getattr(track, "sid", "") or getattr(track, "name", "") or participant.identity
-            if track_sid in subscribed_tracks:
-                return
-            subscribed_tracks.add(track_sid)
-            logger.info(f"Subscribing to audio track from participant {participant.identity} (sid={track_sid})")
+            # Snapback is a 1-on-1 call session; cancel any prior participant tasks
+            for old_id in list(active_participant_tasks.keys()):
+                if old_id != participant.identity:
+                    logger.info(f"Cleaning up prior participant {old_id} before attaching {participant.identity}")
+                    cleanup_participant(old_id)
+
+            cleanup_participant(participant.identity)
+            logger.info(f"Subscribing to audio track from participant {participant.identity}")
             task = asyncio.create_task(pipeline.handle_participant_track(track, participant))
-            active_tasks.add(task)
+            active_participant_tasks[participant.identity] = task
+
             def _cleanup(t: asyncio.Task) -> None:
-                active_tasks.discard(t)
-                subscribed_tracks.discard(track_sid)
+                if active_participant_tasks.get(participant.identity) is t:
+                    active_participant_tasks.pop(participant.identity, None)
+
             task.add_done_callback(_cleanup)
 
     @room.on("track_subscribed")
@@ -948,6 +958,20 @@ async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
         participant: rtc.RemoteParticipant,
     ) -> None:
         subscribe_track(track, participant)
+
+    @room.on("track_unsubscribed")
+    def on_track_unsubscribed(
+        track: rtc.Track,
+        publication: rtc.TrackPublication,
+        participant: rtc.RemoteParticipant,
+    ) -> None:
+        logger.info(f"Track unsubscribed for participant {participant.identity}")
+        cleanup_participant(participant.identity)
+
+    @room.on("participant_disconnected")
+    def on_participant_disconnected(participant: rtc.RemoteParticipant) -> None:
+        logger.info(f"Participant disconnected: {participant.identity}")
+        cleanup_participant(participant.identity)
 
     for participant in room.remote_participants.values():
         for publication in participant.track_publications.values():

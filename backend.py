@@ -44,11 +44,26 @@ def is_agent_process_running() -> bool:
     global _agent_process
     if _agent_process is not None and _agent_process.poll() is None:
         return True
+
+    pid_file = Path("logs/agent.pid")
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text().strip())
+            if psutil.pid_exists(old_pid):
+                cmd = " ".join(psutil.Process(old_pid).cmdline())
+                if "run_agent.py" in cmd or "agent.py" in cmd:
+                    return True
+        except Exception:
+            pass
+
     try:
+        current_pid = os.getpid()
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            if proc.pid == current_pid:
+                continue
             try:
                 cmdline = " ".join(proc.info.get("cmdline") or [])
-                if "agent.py" in cmdline or "run_agent.py" in cmdline:
+                if "run_agent.py" in cmdline or ("agent.py" in cmdline and "dev" in cmdline):
                     return True
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue

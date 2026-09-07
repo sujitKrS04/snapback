@@ -103,24 +103,48 @@ This table confirms that the exact combination used in `agent.py` matches Rime's
 
 ---
 
-## Running the Agent
+## Running the Full Stack
 
-### Development Mode
-Runs the agent worker in local development mode:
+### 1. Start the Booking Backend (FastAPI)
+The backend provides scheduling tools (`/check-availability`, `/book`), LiveKit token generation (`/token`), and SSE telemetry (`/events`):
 ```bash
-python agent.py dev
+uvicorn backend:app --host 127.0.0.1 --port 8000
 ```
 
-### Connect Mode (Explicit Room)
-Connect directly to a specific room for testing:
+### 2. Start the Voice Agent Runner
+Runs the persistent voice agent connected to the LiveKit room:
 ```bash
-python agent.py connect --room <ROOM_NAME>
+python run_agent.py
 ```
+*(Or run in local development agent worker mode: `python agent.py dev`)*
 
-### Production Start
+### 3. Start the Snapback Studio Frontend
+In a new terminal, launch the modern React + Vite Studio:
 ```bash
-python agent.py start
+cd frontend
+npm install
+npm run dev
 ```
+Open `http://localhost:5173/` in your browser to start a full-duplex conversational voice call!
+
+---
+
+## Snapback Studio & Audio Architecture Hardening
+
+### 1. Snapback Studio Interface
+- **Acoustic Resonator**: 3D interactive orb with real-time waveform reactions to user mic input and agent speech.
+- **Dark & Light Themes**: High-contrast tactile design system with smooth animated theme transitions.
+- **Live Dialogue Stream**: Chronological turn stream showing live speech transcripts and agent responses.
+- **Live Telemetry & SSE**: Non-blocking server-sent event tailing exposing sub-50ms barge-in latency measurements in real time.
+- **Quick-Barge Prompt Chips**: Clickable prompt chips that transmit instant interruption data packets over the WebRTC data channel (`{ type: "barge_in", text: prompt }`).
+- **Built-in Session Recording**: Capture combined canvas, screen, and audio sessions directly to WebM/MP4 format.
+
+### 2. Audio Pipeline & Distortion Hardening
+- **16-bit PCM Chunk Alignment**: When streaming raw 16-bit linear PCM (`audio/pcm`), network chunk fragmentation can yield odd byte boundaries. Snapback integrates an automatic even-byte chunk alignment buffer (`_patch_rime_chunk_alignment()`), preventing sample transposition and eliminating crackling/buzzing distortion.
+- **Native Playout Synchronization**: Uses `AudioSource.wait_for_playout()` rather than manual sleep timers, ensuring that HTTP synthesis latency is not subtracted from speech duration and preventing sentences from cutting off mid-speech.
+- **Singleton Process Protection**: Enforces a PID lockfile (`logs/agent.pid`) and process guards in `run_agent.py` and `backend.py`, preventing duplicate agent workers from connecting to the same room and conflicting on STT streams.
+- **Dynamic Participant Lifecycle**: Automatically cleans up and cancels STT tasks on `@room.on("participant_disconnected")` and `@room.on("track_unsubscribed")`, eliminating ghost listener tasks across call reconnects.
+- **DOM Audio Stacking Prevention**: Automatically manages `<audio>` element lifecycles in `useLiveKit.ts`, ensuring zero audio element duplication or comb-filter phase cancellation distortion.
 
 ---
 
