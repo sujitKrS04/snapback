@@ -30,7 +30,7 @@ import re
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import httpx
 from dotenv import load_dotenv
@@ -354,7 +354,7 @@ async def _openai_orchestrate(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": transcript},
             ],
-            tools=TOOLS,
+            tools=cast(Any, TOOLS),
             tool_choice="auto",
         )
 
@@ -363,13 +363,16 @@ async def _openai_orchestrate(
         # If the model chose a tool call
         if message.tool_calls:
             tc = message.tool_calls[0]
-            tool_name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                args = {}
-            logger.info("OpenAI tool_call: tool=%s args=%s", tool_name, args)
-            return {"tool": tool_name, "args": args}
+            fn = getattr(tc, "function", None)
+            if fn is not None:
+                tool_name = getattr(fn, "name", "")
+                raw_args = getattr(fn, "arguments", "{}")
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {}
+                logger.info("OpenAI tool_call: tool=%s args=%s", tool_name, args)
+                return {"tool": tool_name, "args": args}
 
         # Otherwise it's a direct conversational response
         content = message.content or ""
@@ -432,7 +435,7 @@ async def orchestrate(
     resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
     # Use heuristic if forced or no API key is available
-    if use_heuristic or not resolved_key or resolved_key.startswith("your_"):
+    if use_heuristic or not resolved_key or resolved_key.startswith("your_") or os.getenv("FORCE_HEURISTIC", "true").lower() in ("true", "1", "yes"):
         logger.info("Using heuristic parser for transcript: %s", transcript[:80])
         result: dict[str, Any] | str = _heuristic_parse(transcript)
     else:
@@ -560,3 +563,127 @@ async def execute_with_fencing(
 
     # No session / no request_id — pass through unconditionally
     return raw_result
+
+
+# ---------------------------------------------------------------------------
+# Natural Spoken Response Generation (for TTS)
+# ---------------------------------------------------------------------------
+
+
+def _format_spoken_time(slot: str) -> str:
+    """Convert 24-hour time or numeric slot into natural conversational English."""
+    slot = slot.strip()
+    try:
+        if ":" in slot:
+            h_str, m_str = slot.split(":", 1)
+            h = int(h_str)
+            m = int(m_str)
+            period = "AM" if h < 12 else "PM"
+            h12 = h % 12
+            if h12 == 0:
+                h12 = 12
+            if m == 0:
+                return f"{h12} {period}"
+            return f"{h12}:{m:02d} {period}"
+    except Exception:
+        pass
+    return slot
+
+
+def format_spoken_response(
+    tool_name: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+) -> str:
+    """
+    Format raw backend tool results into natural spoken English for TTS,
+    avoiding raw dicts, military timestamps, or robotic lists.
+    """
+    if tool_name == "check_availability":
+        date = args.get("date", "that day")
+        raw_slots = result.get("available_slots", []) if isinstance(result, dict) else []
+        if not raw_slots:
+            return f"I checked availability for {date}, but unfortunately there are no open slots right now. Would another day work for you?"
+
+        spoken_slots = [_format_spoken_time(s) for s in raw_slots]
+        if len(spoken_slots) == 1:
+            return f"I found an open slot on {date} at {spoken_slots[0]}. Would that time work for you?"
+        elif len(spoken_slots) == 2:
+            return f"I found two open slots on {date} — {spoken_slots[0]} or {spoken_slots[1]}. Would either of those work?"
+        else:
+            first_choice = spoken_slots[1] if len(spoken_slots) > 1 else spoken_slots[0]
+            second_choice = spoken_slots[3] if len(spoken_slots) > 3 else spoken_slots[-1]
+            return f"I found a few open slots on {date} — would {first_choice} or {second_choice} work for you?"
+
+    elif tool_name == "book":
+        date = args.get("date", "")
+        slot = _format_spoken_time(args.get("slot", ""))
+        confirmation = result.get("confirmation", "") if isinstance(result, dict) else str(result)
+        return f"Great, you're all booked for {date} at {slot}! Your confirmation number is {confirmation}."
+
+    if isinstance(result, dict):
+        if "error" in result:
+            return f"I encountered an issue: {result['error']}"
+        return str(result)
+    return str(result)
+
+
+async def generate_spoken_response(
+    tool_name: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+    user_transcript: str = "",
+    *,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> str:
+    """
+    Generate natural spoken speech from tool results via OpenAI LLM if available,
+    falling back to natural conversational formatting.
+    """
+    resolved_key = api_key or os.getenv("OPENAI_API_KEY", "")
+    force_heuristic = os.getenv("FORCE_HEURISTIC", "true").lower() in ("true", "1", "yes")
+
+    if not force_heuristic and resolved_key and not resolved_key.startswith("your_"):
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(
+                api_key=resolved_key,
+                base_url=base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            )
+            resp = await client.chat.completions.create(
+                model=model or os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a friendly appointment booking voice assistant speaking over the phone. "
+                            "Convert this backend tool execution result into ONE short, warm spoken sentence "
+                            "(under 20 words) suitable for Rime text-to-speech. "
+                            "Never include markdown, bullet points, technical json, or debug prefixes like 'Tool result:'."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"User request: {user_transcript}\n"
+                            f"Tool executed: {tool_name}\n"
+                            f"Arguments: {args}\n"
+                            f"Backend response: {result}\n"
+                        ),
+                    },
+                ],
+                max_tokens=60,
+                temperature=0.7,
+            )
+            content = resp.choices[0].message.content or ""
+            cleaned = content.strip().replace('"', '')
+            if cleaned and not cleaned.lower().startswith("tool result:"):
+                return cleaned
+        except Exception as exc:
+            logger.debug("LLM spoken generation failed (%s), using natural template", exc)
+
+    return format_spoken_response(tool_name, args, result)
+

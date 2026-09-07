@@ -31,7 +31,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 import httpx
 import pytest
@@ -882,7 +882,7 @@ class TestRealtimeEventStream:
             async for chunk in resp.body_iterator:
                 if len(events) >= expected:
                     break
-                text = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                text = bytes(chunk).decode("utf-8") if isinstance(chunk, (bytes, memoryview)) else chunk
                 for line in text.splitlines():
                     if line.startswith("data: "):
                         events.append(json.loads(line[6:]))
@@ -925,3 +925,56 @@ class TestRealtimeEventStream:
         assert len(events) == 3
         assert all(e["run_id"] == "run-replay-test" for e in events)
         assert [e["seq"] for e in events] == [1, 2, 3]
+
+
+# ===========================================================================
+# Natural Spoken Response Generation Tests
+# ===========================================================================
+
+
+class TestSpokenResponseGeneration:
+    """Verify that tool results are converted into natural spoken English for TTS
+    without raw debug prefixes, JSON dumps, or technical strings.
+    """
+
+    def test_availability_spoken_response_natural_phrasing(self) -> None:
+        from orchestrator import format_spoken_response
+
+        spoken = format_spoken_response(
+            "check_availability",
+            {"date": "Thursday"},
+            {"available_slots": ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]},
+        )
+        assert "Tool result:" not in spoken
+        assert "available_slots" not in spoken
+        assert "Thursday" in spoken
+        assert ("10:30 AM" in spoken or "9 AM" in spoken)
+        assert ("2 PM" in spoken or "12 PM" in spoken)
+
+    def test_booking_spoken_response_natural_phrasing(self) -> None:
+        from orchestrator import format_spoken_response
+
+        spoken = format_spoken_response(
+            "book",
+            {"date": "Friday", "slot": "14:00"},
+            {"confirmation": "BKG-A1B2C3D4"},
+        )
+        assert "Tool result:" not in spoken
+        assert "Friday" in spoken
+        assert "2 PM" in spoken
+        assert "BKG-A1B2C3D4" in spoken
+
+    @pytest.mark.asyncio
+    async def test_generate_spoken_response_async(self) -> None:
+        from orchestrator import generate_spoken_response
+
+        spoken = await generate_spoken_response(
+            "check_availability",
+            {"date": "Friday"},
+            {"available_slots": ["10:00", "14:00"]},
+            user_transcript="Check availability for Friday",
+        )
+        assert "Tool result:" not in spoken
+        assert "Friday" in spoken
+        assert "work" in spoken.lower() or "slot" in spoken.lower()
+

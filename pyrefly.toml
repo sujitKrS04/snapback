@@ -1,6 +1,4 @@
-[tool.pyrefly]
-# Suppress false positives from Pyrefly trying to parse docstrings, markdown snippets,
-# or in-memory editor scratch buffers as standalone Python scripts.
+# Pyrefly Language Server Configuration
 project-includes = [
     "agent.py",
     "backend.py",
@@ -9,6 +7,7 @@ project-includes = [
     "harness.py",
     "tests/**/*.py",
 ]
+
 project-excludes = [
     ".venv/**",
     "__pyrefly_virtual__/**",
@@ -16,12 +15,6 @@ project-excludes = [
     "**/inmemory/**",
     "scratch/**",
 ]
+
 use-ignore-files = true
 ignore_missing_imports = true
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 100

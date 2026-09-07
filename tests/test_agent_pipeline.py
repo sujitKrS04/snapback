@@ -620,6 +620,155 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
             self.assertIn("state", r)
             self.assertIn("previous_state", r)
 
+    async def test_interim_transcript_never_triggers_tool_or_turn_response(self) -> None:
+        """
+        Verify that interim (non-final) Deepgram ASR transcripts never trigger tool_executor
+        or _execute_turn_response. Only finalized transcripts can execute a turn response.
+        """
+        mock_audio_source = MagicMock(spec=rtc.AudioSource)
+        mock_audio_source.capture_frame = AsyncMock()
+        mock_tts = MagicMock()
+        mock_tool = AsyncMock(return_value="tool output")
+
+        pipeline = VoiceAudioPipeline(
+            audio_source=mock_audio_source,
+            tts_instance=mock_tts,
+            active_tts_provider="rime",
+            tool_executor=mock_tool,
+            log_file_override=str(self.log_file),
+        )
+
+        class InterimOnlyStream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.START_OF_SPEECH,
+                    request_id="interim-test",
+                    alternatives=[],
+                    created_at=0.0,
+                )
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
+                    request_id="interim-test",
+                    alternatives=[stt.SpeechData(text="ID instead.", language="en")],  # type: ignore
+                    created_at=0.0,
+                )
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.END_OF_SPEECH,
+                    request_id="interim-test",
+                    alternatives=[],
+                    created_at=0.0,
+                )
+
+        captured_stdout = io.StringIO()
+        orig_stdout = sys.stdout
+        try:
+            sys.stdout = captured_stdout
+            await pipeline.process_stt_events(InterimOnlyStream(), participant_id="interim-user")  # type: ignore
+            await pipeline.wait_for_tts()
+        finally:
+            sys.stdout = orig_stdout
+
+        # Tool executor must NOT have been called
+        mock_tool.assert_not_called()
+        self.assertIsNone(pipeline._current_response_task)
+        self.assertEqual(pipeline.state, PipelineState.IDLE)
+
+        with open(self.log_file, "r", encoding="utf-8") as f:
+            records = [json.loads(line) for line in f if line.strip()]
+
+        stages = [r["stage"] for r in records]
+        self.assertEqual(stages, ["speech-start", "speech-end"])
+        self.assertNotIn("tool-pending", stages)
+        self.assertNotIn("tool-start", stages)
+        self.assertNotIn("tts-start", stages)
+
+    async def test_stale_transcript_isolation_across_utterances(self) -> None:
+        """
+        Verify that a final transcript from Turn 1 does not leak into Turn 2 if Turn 2
+        ends without emitting its own final transcript (e.g. ambient noise or barge-in fragment).
+        """
+        mock_audio_source = MagicMock(spec=rtc.AudioSource)
+        mock_audio_source.capture_frame = AsyncMock()
+        mock_tts = MagicMock()
+        mock_frame = MagicMock(spec=rtc.AudioFrame)
+
+        async def _mock_synth(text: str):
+            yield tts.SynthesizedAudio(frame=mock_frame, request_id="t1")
+
+        mock_tts.synthesize = MagicMock(side_effect=_mock_synth)
+        mock_tool = AsyncMock(return_value="valid tool result")
+
+        pipeline = VoiceAudioPipeline(
+            audio_source=mock_audio_source,
+            tts_instance=mock_tts,
+            active_tts_provider="rime",
+            tool_executor=mock_tool,
+            log_file_override=str(self.log_file),
+        )
+
+        class MultiTurnStream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                # --- Turn 1: Legitimate query with final transcript ---
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.START_OF_SPEECH,
+                    request_id="turn-1",
+                    alternatives=[],
+                    created_at=0.0,
+                )
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                    request_id="turn-1",
+                    alternatives=[stt.SpeechData(text="check my appointment", language="en")],  # type: ignore
+                    created_at=0.0,
+                )
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.END_OF_SPEECH,
+                    request_id="turn-1",
+                    alternatives=[],
+                    created_at=0.0,
+                )
+
+                # Give Turn 1 time to execute
+                await asyncio.sleep(0.08)
+
+                # --- Turn 2: Speech-start + interim fragment, but NO final transcript emitted ---
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.START_OF_SPEECH,
+                    request_id="turn-2",
+                    alternatives=[],
+                    created_at=0.0,
+                )
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
+                    request_id="turn-2",
+                    alternatives=[stt.SpeechData(text="ID instead.", language="en")],  # type: ignore
+                    created_at=0.0,
+                )
+                yield stt.SpeechEvent(
+                    type=stt.SpeechEventType.END_OF_SPEECH,
+                    request_id="turn-2",
+                    alternatives=[],
+                    created_at=0.0,
+                )
+
+        captured_stdout = io.StringIO()
+        orig_stdout = sys.stdout
+        try:
+            sys.stdout = captured_stdout
+            await pipeline.process_stt_events(MultiTurnStream(), participant_id="turn-user")  # type: ignore
+            await pipeline.wait_for_tts()
+        finally:
+            sys.stdout = orig_stdout
+
+        # mock_tool should have been called EXACTLY ONCE (from Turn 1), NOT twice!
+        self.assertEqual(mock_tool.call_count, 1)
+        mock_tool.assert_called_once_with("check my appointment")
 
     def test_rime_live_catalog_and_preflight_check(self) -> None:
         """
@@ -634,14 +783,14 @@ class TestAgentPipeline(unittest.IsolatedAsyncioTestCase):
           * WebSocket bidirectional streaming: wss://users-ws.rime.ai
         """
         import typing
-        from livekit.plugins import rime
+        from livekit.plugins.rime import models, langs
 
         # 1. Verify Model ID against Rime TTSModels enum
-        model_args = typing.get_args(rime.models.TTSModels)
+        model_args = typing.get_args(models.TTSModels)
         self.assertIn("coda", model_args, "Model 'coda' must be in Rime TTSModels")
 
         # 2. Verify Language Code against Rime TTSLangs enum
-        lang_args = typing.get_args(rime.langs.TTSLangs)
+        lang_args = typing.get_args(langs.TTSLangs)
         self.assertIn("eng", lang_args, "Language 'eng' must be in Rime TTSLangs")
 
         # 3. Verify HTTP transport configuration

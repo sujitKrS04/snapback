@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Optional, cast
 import uuid
 
 from dotenv import load_dotenv
@@ -31,7 +31,13 @@ from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli
 from livekit.agents import stt, tts
 from livekit.plugins import deepgram, rime
 
-from orchestrator import SessionStateManager
+from orchestrator import (
+    SessionStateManager,
+    call_backend_tool,
+    format_spoken_response,
+    generate_spoken_response,
+    orchestrate,
+)
 
 load_dotenv()
 
@@ -346,7 +352,7 @@ class VoiceAudioPipeline:
         """Schedule an async callback without awaiting; swallows errors in logs."""
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(coro)
+            asyncio.ensure_future(coro, loop=loop)
         except Exception:  # noqa: BLE001
             logger.debug("Could not schedule pipeline callback")
 
@@ -494,7 +500,7 @@ class VoiceAudioPipeline:
                         return
                     tool_result = fenced_result
 
-                response_text = f"Tool result: {tool_result}"
+                response_text = tool_result
                 # Yield control so an interrupt after tool result but before TTS speaking can trigger cleanly
                 await asyncio.sleep(0.05)
 
@@ -581,6 +587,8 @@ class VoiceAudioPipeline:
                         "speech-start",
                         participant_id=participant_id,
                     )
+                # Reset per-utterance transcript accumulator so interim or stale transcripts never trigger execution
+                self._current_utterance_transcript = None
 
             elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
                 # Interruption guard in case START_OF_SPEECH was missed
@@ -611,11 +619,14 @@ class VoiceAudioPipeline:
             elif event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                 alt_texts = [alt.text for alt in event.alternatives if alt.text]
                 if alt_texts:
-                    final_text = " ".join(alt_texts)
-                    sys.stdout.write(f"\n[Deepgram ASR Final] {final_text}\n")
-                    sys.stdout.flush()
-                    if self.on_transcript:
-                        await self.on_transcript("user", final_text)
+                    final_text = " ".join(alt_texts).strip()
+                    if final_text:
+                        self._current_utterance_transcript = final_text
+                        self._last_final_transcript = final_text
+                        sys.stdout.write(f"\n[Deepgram ASR Final] {final_text}\n")
+                        sys.stdout.flush()
+                        if self.on_transcript:
+                            await self.on_transcript("user", final_text)
 
             elif event.type == stt.SpeechEventType.END_OF_SPEECH:
                 if self.is_speaking:
@@ -629,15 +640,30 @@ class VoiceAudioPipeline:
                     # Cancel any prior lingering response task
                     if self._current_response_task and not self._current_response_task.done():
                         self._current_response_task.cancel()
-                        
+
+                    # Strictly require a non-empty final transcript from the current utterance.
+                    # Interim transcripts, empty VAD clicks, or stale prior transcripts
+                    # must NEVER trigger turn response or tool execution.
+                    current_tx = getattr(self, "_current_utterance_transcript", None)
+                    self._current_utterance_transcript = None
+
+                    if not current_tx or not current_tx.strip():
+                        logger.debug("Speech ended without a final transcript for this utterance; skipping turn execution.")
+                        return
+
                     request_id = f"utt-{uuid.uuid4().hex[:12]}"
                     if self._session:
                         request_id = self._session.issue_request(request_id)
 
                     # Launch managed turn response asynchronously
                     self._current_response_task = asyncio.create_task(
-                        self._execute_turn_response(participant_id=participant_id, request_id=request_id)
+                        self._execute_turn_response(
+                            participant_id=participant_id,
+                            transcript=current_tx,
+                            request_id=request_id,
+                        )
                     )
+
 
     async def handle_participant_track(
         self,
@@ -691,10 +717,33 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.room.local_participant.publish_track(agent_audio_track, pub_options)
     logger.info("Published agent audio track to room")
 
+    session = SessionStateManager(log_file=os.getenv("LOG_FILE_PATH", "logs/agent.log"))
+
+    async def tool_executor(transcript: str) -> str:
+        try:
+            req_id = session.current_request_id
+            intent = await orchestrate(transcript, session=session, utterance_id=req_id)
+            if isinstance(intent, dict):
+                backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+                res = await call_backend_tool(intent, base_url=backend_url, request_id=req_id)
+                spoken = await generate_spoken_response(
+                    intent.get("tool", ""),
+                    intent.get("args", {}),
+                    res,
+                    user_transcript=transcript,
+                )
+                return spoken
+            return intent
+        except Exception as err:
+            logger.error(f"Error in tool_executor: {err}")
+            return f"I encountered an issue: {err}"
+
     pipeline = VoiceAudioPipeline(
         audio_source=audio_source,
         tts_instance=tts_instance,
         active_tts_provider=active_provider,
+        session=session,
+        tool_executor=tool_executor,
     )
 
     _PIPELINE_TO_UI_STATE: dict[PipelineState, str] = {
@@ -709,7 +758,7 @@ async def entrypoint(ctx: JobContext) -> None:
     async def send_data_message(payload: dict[str, Any]) -> None:
         try:
             await ctx.room.local_participant.publish_data(
-                data=json.dumps(payload).encode("utf-8"),
+                payload=json.dumps(payload).encode("utf-8"),
                 topic="snapback",
             )
         except Exception as e:  # noqa: BLE001

@@ -8,3 +8,4 @@ harness_report.txt
 dist/
 build/
 *.egg-info/
+scratch/

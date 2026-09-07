@@ -31,6 +31,8 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
+logger = logging.getLogger("snapback-backend")
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -332,6 +334,29 @@ async def get_token(body: TokenRequest) -> TokenResponse:
         payload={"room": body.room, "identity": body.identity},
     )
     return TokenResponse(token=token, url=url)
+
+
+@app.post("/save-recording", tags=["recording"])
+async def save_recording(request: Request) -> JSONResponse:
+    """Save an uploaded screen/audio recording (.webm) to project root and artifacts directory."""
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty recording payload")
+    
+    out_paths = [
+        Path("live_interrupt_demo.webm"),
+        Path("logs/live_interrupt_demo.webm"),
+        Path(r"C:\Users\SUJIT\.gemini\antigravity-ide\brain\3033a12f-269c-4f10-b85c-fcaf6af6a356\live_interrupt_demo.webm"),
+    ]
+    for p in out_paths:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(body)
+        except Exception as e:
+            logger.warning(f"Could not write recording to {p}: {e}")
+            
+    return JSONResponse({"status": "saved", "bytes": len(body), "filename": "live_interrupt_demo.webm"})
 
 
 @app.get("/events", tags=["realtime"])

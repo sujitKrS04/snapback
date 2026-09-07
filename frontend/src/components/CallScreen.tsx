@@ -81,6 +81,100 @@ export function CallScreen() {
     el.classList.add("waveform-snap-flash");
   }, [interruptFlashKey]);
 
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+
+  const startRecording = async () => {
+    try {
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: true,
+      });
+
+      const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      const dest = audioCtx.createMediaStreamDestination();
+
+      if (displayStream.getAudioTracks().length > 0) {
+        const displayAudioSource = audioCtx.createMediaStreamSource(
+          new MediaStream([displayStream.getAudioTracks()[0]])
+        );
+        displayAudioSource.connect(dest);
+      }
+
+      if (micTrack) {
+        const micSource = audioCtx.createMediaStreamSource(new MediaStream([micTrack]));
+        micSource.connect(dest);
+      }
+
+      if (agentTrack) {
+        const agentSource = audioCtx.createMediaStreamSource(new MediaStream([agentTrack]));
+        agentSource.connect(dest);
+      }
+
+      const tracks: MediaStreamTrack[] = [...displayStream.getVideoTracks()];
+      if (dest.stream.getAudioTracks().length > 0) {
+        tracks.push(dest.stream.getAudioTracks()[0]);
+      } else if (displayStream.getAudioTracks().length > 0) {
+        tracks.push(displayStream.getAudioTracks()[0]);
+      }
+
+      const combinedStream = new MediaStream(tracks);
+      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+        ? "video/webm;codecs=vp9,opus"
+        : MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
+        ? "video/webm;codecs=vp8,opus"
+        : "video/webm";
+
+      const recorder = new MediaRecorder(combinedStream, { mimeType });
+      recordedChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `snapback_live_interrupt_demo_${Date.now()}.webm`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        try {
+          await fetch(`${API_BASE}/save-recording`, {
+            method: "POST",
+            body: blob,
+          });
+        } catch (e) {
+          console.error("Could not upload recording to backend:", e);
+        }
+
+        displayStream.getTracks().forEach((t) => t.stop());
+        setIsRecording(false);
+      };
+
+      displayStream.getVideoTracks()[0].onended = () => {
+        if (recorder.state !== "inactive") recorder.stop();
+      };
+
+      recorder.start(500);
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Failed to start screen recording:", err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
   const handleToggleTheme = useCallback(() => {
     setIsDark((d) => {
       const next = !d;
@@ -134,6 +228,18 @@ export function CallScreen() {
             Snapback
           </h1>
           <div className="flex items-center gap-3">
+            <button
+              onClick={isRecording ? stopRecording : startRecording}
+              className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition-all ${
+                isRecording
+                  ? "bg-red-500/20 text-red-400 border border-red-500/50 animate-pulse"
+                  : "bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-subtle)]"
+              }`}
+              title={isRecording ? "Stop recording video" : "Record demo clip (.webm) with mic and Rime audio"}
+            >
+              <span className={`inline-block h-2 w-2 rounded-full ${isRecording ? "bg-red-500" : "bg-zinc-400"}`} />
+              {isRecording ? "Recording..." : "Record Clip (.webm)"}
+            </button>
             {isConnected && (
               <span className="provider-badge">Active speech provider: Rime</span>
             )}

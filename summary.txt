@@ -1,0 +1,41 @@
+================================================================================
+SNAPBACK VOICE AGENT: INTERRUPT & STATE FENCING VERIFICATION SUMMARY
+================================================================================
+
+1. PRIMARY REAL-WORLD BENCHMARK: run-f6d66d9d (LIVE PHYSICAL MIC & WEBRTC ROOM)
+--------------------------------------------------------------------------------
+- Test Environment: Real human speech into physical microphone, LiveKit Cloud
+  WebRTC room (snapback-call), native C++ AudioSource, Deepgram streaming ASR,
+  official Rime TTS (coda/celeste, 22.05 kHz), FastAPI backend.
+- Log Source: logs/agent.log (pre-fix baseline capture, 11 genuine acoustic barge-ins)
+- Total Trials (N): 11
+- Key Performance Metrics (N = 11):
+  * Full Latency Array (ms): [7.79, 8.51, 9.13, 9.59, 10.28, 10.85, 11.20, 11.32, 16.30, 20.81, 41.80]
+  * Median Cancel Latency:   10.85 ms
+  * Full Latency Range:      7.79 ms – 41.80 ms (10 of 11 trials <= 20.81 ms)
+  * Mean Cancel Latency:     14.33 ms (non-outlier mean: 11.58 ms)
+  * 90th Percentile (P90):   20.81 ms
+  * Acceptance Threshold:    < 50.0 ms (100% PASS)
+  * SSE Delivery Latency:    ~20 – 30 ms
+  * Audio Leakage:           0 ms (instant native WebRTC queue clear)
+
+2. CONFIRMATORY POST-FIX SESSION: run-clean-604e2d2f (ZERO-LEAK VERIFICATION)
+--------------------------------------------------------------------------------
+- Pipeline Configuration: Per-utterance accumulator isolation, natural spoken phrasing,
+  official Rime TTS (coda/celeste, 22.05 kHz), FastAPI backend, SessionStateManager.
+- Log Source: logs/agent.log (87 structured JSON lines)
+- Total Trials (N): 11 distinct interruptions across 10 intentional queries + 3 interim noise tests.
+- Zero Leaks Confirmed: 100% of tool-starts mapped 1:1 to intentional user queries;
+  all interim noise fragments ("ID instead.", "uh wait a sec", coughs) rejected with 0 leaks.
+- Key Performance Metrics (N = 11):
+  * Full Latency Array (ms): [0.90, 0.97, 0.99, 1.45, 1.56, 1.57, 1.96, 2.16, 2.33, 3.92, 5.53]
+  * Median Cancel Latency:   1.57 ms (in-process audio sink, no native C++ driver sync)
+  * Full Latency Range:      0.90 ms – 5.53 ms (Mean: 2.12 ms, P90: 3.92 ms)
+  * Acceptance Threshold:    < 50.0 ms (100% PASS)
+
+3. IN-PROCESS REGRESSION HARNESS (harness.py)
+--------------------------------------------------------------------------------
+- Cancel Latency:      2.79 ms (synthetic asyncio coroutine abort)
+- Stale-Result Fencing: PASS (1 stale result discarded after delayed completion)
+- SSE Latency:         ~30 ms
+================================================================================
