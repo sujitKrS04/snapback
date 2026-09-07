@@ -140,20 +140,32 @@ All stage transitions are written to `logs/agent.log` (and `/logs/agent.log` if 
 
 ## Running Automated Tests & Preflight Verification
 
-Run the full end-to-end verification and preflight check suite:
+Run the full automated test suite using `pytest`:
 ```bash
-python -m unittest discover tests -v
+pytest
+```
+or with verbose output:
+```bash
+pytest -v
 ```
 
-All 11 tests pass:
-1. `test_rime_live_catalog_and_preflight_check`: Verifies `coda`, `celeste`, `eng`, 22050Hz, HTTP and WebSocket endpoints against Rime live catalog and plugin specifications.
-2. `test_log_stage_json_format_and_timestamps`: Sequential timeline metadata (`seq`, `run_id`, `state`, ISO timestamps).
-3. `test_process_stt_events_and_stdout_stream`: Live stdout transcript streaming.
-4. `test_speak_test_response`: Audio frame synthesis and track delivery.
-5. `test_full_round_trip_audio_verification`: Complete user speech -> stdout -> TTS response round trip.
-6. `test_barge_in_interruption_and_latency_logging`: Active TTS interruption, queue flush, and cancellation latency.
-7. `test_double_interrupt_in_a_row`: Consecutive interruptions without race conditions or crashes.
-8. `test_interrupt_before_tool_call_started`: Interruptions during `tool-pending` aborting tool execution.
-9. `test_interrupt_after_tool_result_arrived_before_tts`: Interruption during `tool-completed` discarding tool results before TTS.
-10. `test_tts_provider_switching_and_status`: Provider switching (Rime -> Deepgram) and `pipeline.status` inspection.
-11. `test_full_timeline_reconstruction`: Deterministic sequential reconstruction of full runs.
+The test suite consists of **86 passing tests** with 100% pass rate across two primary test modules:
+
+### 1. Voice Agent Pipeline & Barge-In Hardening ([`tests/test_agent_pipeline.py`](file:///d:/Projects/snapback/tests/test_agent_pipeline.py) — 17 tests)
+- **Rime Live Catalog Preflight**: Validates `coda` model, `celeste` speaker, `eng` language, 22,050 Hz output, and HTTP/WebSocket transport endpoints against official Rime plugin enums.
+- **Edge-Case Interruption Hardening**: Exhaustive validation of all 3 interruption lifecycle scenarios:
+  - *Scenario 1*: Interruption before tool dispatch (`tool-pending` -> `tool-cancelled`).
+  - *Scenario 2*: Interruption during in-flight tool execution (`tool-running` -> `tool-cancelled`).
+  - *Scenario 3*: Interruption during active audio playback (`tts-speaking` -> `tts-cancelled` with instantaneous native buffer queue flush).
+- **Double-Interrupt & Re-entrancy Safety**: Rapid-fire sequential barge-ins tested without race conditions, deadlocks, or task leaks.
+- **Interim ASR Transcript Isolation**: Confirms that partial Deepgram speech frames (`INTERIM_TRANSCRIPT`) never trigger tool execution or turn responses.
+- **Per-Utterance Accumulator Isolation**: Ensures completed transcripts from prior turns cannot leak across speech boundaries.
+- **Deterministic Timeline Logging**: Validates sequential `seq` counter monotonicity, run IDs, ISO-8601 UTC timestamps, and stage transition records.
+
+### 2. Backend, Orchestrator, Fencing & SSE Streaming ([`tests/test_backend_and_orchestrator.py`](file:///d:/Projects/snapback/tests/test_backend_and_orchestrator.py) — 69 tests)
+- **FastAPI Booking Service**: Endpoint contracts, query parameters, artificial latency injection, and structured JSON access logging for `/check-availability`, `/book`, and `/health`.
+- **LiveKit Room Authentication**: JWT generation and video grant validation for the `/token` endpoint.
+- **Server-Sent Events (SSE) Engine**: Real-time `/events` streaming with non-blocking log tailing, padded replay framing, and live timeline event ingestion.
+- **LLM Intent Orchestration**: Heuristic & OpenAI function-calling parser, intent routing, parameter extraction, and conversational fallbacks.
+- **Natural Spoken Response Synthesis**: Conversion of raw backend availability JSON payloads into natural spoken sentences (`generate_spoken_response`), eliminating raw debug prefixes (`"Tool result:"`).
+- **Session State Management & Request-ID Fencing**: `SessionStateManager` monotonic utterance request tracking, concurrent supersession gating, and automated stale-result discard logging.
