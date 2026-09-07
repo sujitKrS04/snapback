@@ -12,9 +12,9 @@ end-to-end, producing structured log evidence for every run.
 
 | Module | Role |
 |---|---|
-| [`backend.py`](file:///c:/Projects/snapback/backend.py) | FastAPI booking backend - `/check-availability`, `/book` |
-| [`orchestrator.py`](file:///c:/Projects/snapback/orchestrator.py) | LLM orchestration + `SessionStateManager` state fencing |
-| [`agent.py`](file:///c:/Projects/snapback/agent.py) | `StructuredTimelineLogger` - pipeline event logging |
+| [`backend.py`](file:///d:/Projects/snapback/backend.py) | FastAPI booking backend - `/check-availability`, `/book` |
+| [`orchestrator.py`](file:///d:/Projects/snapback/orchestrator.py) | LLM orchestration + `SessionStateManager` state fencing |
+| [`agent.py`](file:///d:/Projects/snapback/agent.py) | `StructuredTimelineLogger` - pipeline event logging |
 
 ---
 
@@ -228,8 +228,7 @@ The primary real-world verification benchmark for Snapback's interrupt latency w
 - **Audio Source**: Physical hardware microphone capturing real human vocal utterances.
 - **WebRTC Transport**: LiveKit Cloud room (`snapback-call`) with native C++ WebRTC audio tracks and data channels.
 - **ASR**: Real-time streaming Deepgram (`nova-3`).
-- **TTS**: Official Rime TTS (`coda` / `celeste` 22,050 Hz).
-- **Video Artifact**: Synchronized screen & audio recording in WebM and MP4 formats ([`live_interrupt_demo.webm`](file:///d:/Projects/snapback/live_interrupt_demo.webm) / [`live_interrupt_demo.mp4`](file:///d:/Projects/snapback/live_interrupt_demo.mp4)).
+- **Video Artifact**: Synchronized screen & audio recording in MP4 format ([`live_interrupt_demo.mp4`](file:///d:/Projects/snapback/live_interrupt_demo.mp4)).
 
 ### Primary Live Interruption Dataset ($N = 11$, `run-f6d66d9d`)
 
