@@ -100,6 +100,11 @@ export function useLiveKit(): UseLiveKitReturn {
 
     room.on(RoomEvent.TrackSubscribed, (track) => {
       if (track.kind === Track.Kind.Audio) {
+        // Remove any existing agent audio elements to prevent duplicate playout and phase cancellation distortion
+        document.querySelectorAll("audio[id^='agent-audio-']").forEach((el) => {
+          (el as HTMLAudioElement).pause();
+          el.remove();
+        });
         const el = track.attach();
         el.id = `agent-audio-${track.sid}`;
         document.body.appendChild(el);
@@ -113,6 +118,10 @@ export function useLiveKit(): UseLiveKitReturn {
     room.on(RoomEvent.TrackUnsubscribed, (track) => {
       if (track.kind === Track.Kind.Audio) {
         track.detach().forEach((el) => el.remove());
+        document.querySelectorAll(`audio[id='agent-audio-${track.sid}']`).forEach((el) => {
+          (el as HTMLAudioElement).pause();
+          el.remove();
+        });
         if (!track.isLocal) {
           setAgentTrack(null);
         }
@@ -139,6 +148,12 @@ export function useLiveKit(): UseLiveKitReturn {
     });
 
     try {
+      // Clean up any stale audio tags before connecting
+      document.querySelectorAll("audio[id^='agent-audio-']").forEach((el) => {
+        (el as HTMLAudioElement).pause();
+        el.remove();
+      });
+
       await room.connect(url, token);
       setConnectionState(ConnectionState.Connected);
 
@@ -165,6 +180,11 @@ export function useLiveKit(): UseLiveKitReturn {
       setConnectionState(ConnectionState.Disconnected);
       setMicTrack(null);
       setAgentTrack(null);
+      // Remove all agent audio playback elements from DOM
+      document.querySelectorAll("audio[id^='agent-audio-']").forEach((el) => {
+        (el as HTMLAudioElement).pause();
+        el.remove();
+      });
     }
   }, []);
 

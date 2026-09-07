@@ -54,6 +54,48 @@ DEFAULT_HARDCODED_SENTENCE = (
 )
 
 
+def _patch_rime_chunk_alignment() -> None:
+    """Ensure Rime HTTP chunked stream buffers odd bytes to maintain strict 16-bit PCM sample alignment."""
+    try:
+        from livekit.plugins.rime import tts as rime_tts
+
+        if getattr(rime_tts.ChunkedStream, "_even_byte_patched", False):
+            return
+
+        orig_run = rime_tts.ChunkedStream._run
+
+        async def _safe_run(self: Any, output_emitter: Any) -> None:
+            orig_push = output_emitter.push
+            remainder = b""
+
+            def _aligned_push(data: bytes | bytearray) -> None:
+                nonlocal remainder
+                bdata = bytes(data)
+                if remainder:
+                    bdata = remainder + bdata
+                    remainder = b""
+                if len(bdata) % 2 != 0:
+                    remainder = bdata[-1:]
+                    bdata = bdata[:-1]
+                if bdata:
+                    orig_push(bdata)
+
+            output_emitter.push = _aligned_push
+            try:
+                await orig_run(self, output_emitter)
+            finally:
+                if remainder:
+                    orig_push(remainder + b"\x00")
+
+        rime_tts.ChunkedStream._run = _safe_run
+        rime_tts.ChunkedStream._even_byte_patched = True
+    except Exception as e:
+        logger.debug(f"Could not apply Rime chunk alignment patch: {e}")
+
+
+_patch_rime_chunk_alignment()
+
+
 class PipelineState(str, Enum):
     IDLE = "idle"
     LISTENING = "listening"
@@ -508,7 +550,6 @@ class VoiceAudioPipeline:
                 await asyncio.sleep(0.05)
 
             # Synthesize and stream TTS
-            self._tts_start_time = time.perf_counter()
             self._transition_to(
                 PipelineState.TTS_SPEAKING,
                 "tts-start",
@@ -526,10 +567,25 @@ class VoiceAudioPipeline:
 
             synth_stream = self.tts.synthesize(response_text)
             frame_count = 0
+            playback_start = time.perf_counter()
+            queued_audio_duration = 0.0
+
             async for audio_chunk in synth_stream:
                 if hasattr(audio_chunk, "frame") and audio_chunk.frame is not None:
-                    await self.audio_source.capture_frame(audio_chunk.frame)
+                    frame = audio_chunk.frame
+                    await self.audio_source.capture_frame(frame)
                     frame_count += 1
+                    frame_dur = getattr(frame, "duration", None)
+                    if isinstance(frame_dur, (int, float)) and frame_dur > 0:
+                        queued_audio_duration += frame_dur
+
+            # Maintain active TTS_SPEAKING state until all queued audio frames finish playing out through WebRTC
+            if hasattr(self.audio_source, "wait_for_playout"):
+                res = self.audio_source.wait_for_playout()
+                if asyncio.iscoroutine(res):
+                    await res
+            elif queued_audio_duration > 0:
+                await asyncio.sleep(queued_audio_duration)
 
             self.is_tts_active = False
             self._transition_to(
@@ -579,16 +635,11 @@ class VoiceAudioPipeline:
         """
         async for event in stt_stream:
             if event.type == stt.SpeechEventType.START_OF_SPEECH:
-                # Barge-in check during active TTS playback:
+                # When agent is speaking, raw VAD energy occurs from speaker output.
+                # We do not cut off the agent on raw energy alone; genuine barge-in
+                # is triggered as soon as words arrive in INTERIM_TRANSCRIPT.
                 if self.state == PipelineState.TTS_SPEAKING or self.is_tts_active:
-                    tts_elapsed = time.perf_counter() - getattr(self, "_tts_start_time", 0.0)
-                    # Allow 250ms grace window for initial speaker transient/bleed.
-                    # After 250ms of playback, any user speech energy immediately cuts off TTS (<50ms).
-                    if tts_elapsed > 0.25:
-                        await self.cancel_active(participant_id=participant_id)
-                    else:
-                        # Within initial transient onset: don't falsely interrupt yet
-                        continue
+                    continue
 
                 if not self.is_speaking:
                     self.is_speaking = True
@@ -674,11 +725,6 @@ class VoiceAudioPipeline:
             elif event.type == stt.SpeechEventType.END_OF_SPEECH:
                 if self.is_speaking:
                     self.is_speaking = False
-                    self._transition_to(
-                        PipelineState.IDLE,
-                        "speech-end",
-                        participant_id=participant_id,
-                    )
 
                     # If final transcript hasn't arrived yet from Deepgram, give it a grace window
                     if not getattr(self, "_current_utterance_transcript", None):
@@ -695,11 +741,24 @@ class VoiceAudioPipeline:
 
                     if not current_tx or not current_tx.strip():
                         logger.debug("Speech ended without a final transcript for this utterance; skipping turn execution.")
+                        # If agent is currently speaking, preserve TTS_SPEAKING state so voice playback does not break
+                        if not (self.is_tts_active or self.state == PipelineState.TTS_SPEAKING):
+                            self._transition_to(
+                                PipelineState.IDLE,
+                                "speech-end",
+                                participant_id=participant_id,
+                            )
                         return
 
                     # Only cancel prior response task now that we have a valid, new non-empty utterance
                     if self._current_response_task and not self._current_response_task.done():
                         self._current_response_task.cancel()
+
+                    self._transition_to(
+                        PipelineState.IDLE,
+                        "speech-end",
+                        participant_id=participant_id,
+                    )
 
                     request_id = f"utt-{uuid.uuid4().hex[:12]}"
                     if self._session:
@@ -729,6 +788,7 @@ class VoiceAudioPipeline:
             vad_events=True,
             interim_results=True,
             punctuate=True,
+            endpointing_ms=300,
         )
         stt_stream = dg_stt.stream()
 
@@ -759,8 +819,9 @@ class VoiceAudioPipeline:
 
 async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
     """Initialize and run the voice audio pipeline inside any connected rtc.Room."""
-    # Initialize TTS provider based on environment configuration
-    tts_instance, active_provider, tts_sample_rate = create_tts_provider()
+    # Initialize TTS provider: use 24000Hz for WebRTC audio to prevent frame drops and Opus clock drift
+    desired_sample_rate = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
+    tts_instance, active_provider, tts_sample_rate = create_tts_provider(sample_rate=desired_sample_rate)
     logger.info(f"Initialized active TTS provider: '{active_provider}' at {tts_sample_rate}Hz")
 
     audio_source = rtc.AudioSource(sample_rate=tts_sample_rate, num_channels=1)
@@ -839,6 +900,29 @@ async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
     pipeline.on_transition = on_transition
     pipeline.on_interrupt = on_interrupt
     pipeline.on_transcript = on_transcript
+
+    async def handle_external_utterance(text: str) -> None:
+        await pipeline.cancel_active()
+        if pipeline.on_transcript:
+            await pipeline.on_transcript("user", text)
+        req_id = f"utt-{uuid.uuid4().hex[:12]}"
+        if session:
+            req_id = session.issue_request(req_id)
+        pipeline._current_response_task = asyncio.create_task(
+            pipeline._execute_turn_response(transcript=text, request_id=req_id)
+        )
+
+    @room.on("data_received")
+    def on_data_received(data_packet: Any) -> None:
+        try:
+            raw = getattr(data_packet, "data", data_packet)
+            msg = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw))
+            if msg.get("type") in ("user_utterance", "barge_in"):
+                text = msg.get("text", "")
+                if text:
+                    asyncio.create_task(handle_external_utterance(text))
+        except Exception as err:
+            logger.debug(f"Error handling data packet: {err}")
 
     active_tasks: set[asyncio.Task] = set()
     subscribed_tracks: set[str] = set()

@@ -224,6 +224,17 @@ export function CallScreen({ onReturnToIntro }: CallScreenProps) {
       setCopiedPrompt(prompt);
       setTimeout(() => setCopiedPrompt(null), 2500);
     } catch {}
+
+    if (room && isConnected) {
+      try {
+        room.localParticipant.publishData(
+          new TextEncoder().encode(JSON.stringify({ type: "barge_in", text: prompt })),
+          { topic: "snapback" }
+        );
+      } catch (err) {
+        console.error("Error publishing quick-barge data:", err);
+      }
+    }
   };
 
   const streamStatus =
