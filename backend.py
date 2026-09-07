@@ -346,7 +346,6 @@ async def save_recording(request: Request) -> JSONResponse:
     out_paths = [
         Path("live_interrupt_demo.webm"),
         Path("logs/live_interrupt_demo.webm"),
-        Path(r"C:\Users\SUJIT\.gemini\antigravity-ide\brain\3033a12f-269c-4f10-b85c-fcaf6af6a356\live_interrupt_demo.webm"),
     ]
     for p in out_paths:
         try:
