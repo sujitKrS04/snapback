@@ -508,6 +508,7 @@ class VoiceAudioPipeline:
                 await asyncio.sleep(0.05)
 
             # Synthesize and stream TTS
+            self._tts_start_time = time.perf_counter()
             self._transition_to(
                 PipelineState.TTS_SPEAKING,
                 "tts-start",
@@ -578,10 +579,17 @@ class VoiceAudioPipeline:
         """
         async for event in stt_stream:
             if event.type == stt.SpeechEventType.START_OF_SPEECH:
-                # VAD detected audio energy: mark speaking state and reset accumulator.
-                # Note: We do NOT cancel active TTS or tools on raw VAD energy alone,
-                # because speaker acoustic echo or ambient room noise triggers VAD energy
-                # with zero spoken words and would cut off the agent's speech mid-sentence.
+                # Barge-in check during active TTS playback:
+                if self.state == PipelineState.TTS_SPEAKING or self.is_tts_active:
+                    tts_elapsed = time.perf_counter() - getattr(self, "_tts_start_time", 0.0)
+                    # Allow 250ms grace window for initial speaker transient/bleed.
+                    # After 250ms of playback, any user speech energy immediately cuts off TTS (<50ms).
+                    if tts_elapsed > 0.25:
+                        await self.cancel_active(participant_id=participant_id)
+                    else:
+                        # Within initial transient onset: don't falsely interrupt yet
+                        continue
+
                 if not self.is_speaking:
                     self.is_speaking = True
                     self._transition_to(
