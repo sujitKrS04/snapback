@@ -517,6 +517,12 @@ class VoiceAudioPipeline:
                 request_id=request_id,
             )
             self.is_tts_active = True
+            if self.on_transcript and response_text:
+                try:
+                    await self.on_transcript("agent", response_text)
+                except Exception as e:
+                    logger.debug(f"Error publishing agent transcript: {e}")
+
             synth_stream = self.tts.synthesize(response_text)
             frame_count = 0
             async for audio_chunk in synth_stream:
@@ -547,6 +553,7 @@ class VoiceAudioPipeline:
                 error=str(e),
                 request_id=request_id,
             )
+            logger.error(f"Error during turn response execution: {e}")
 
     async def speak_test_response(self, participant_id: Optional[str] = None, transcript: str = "", request_id: Optional[str] = None) -> None:
         """Direct invocation helper that executes turn response and awaits completion."""
@@ -571,16 +578,8 @@ class VoiceAudioPipeline:
         """
         async for event in stt_stream:
             if event.type == stt.SpeechEventType.START_OF_SPEECH:
-                # Interruption check: cancel any active TTS, tool, or pending execution
-                if self.state in (
-                    PipelineState.TTS_SPEAKING,
-                    PipelineState.TOOL_PENDING,
-                    PipelineState.TOOL_RUNNING,
-                    PipelineState.TOOL_COMPLETED,
-                ) or (self._current_response_task and not self._current_response_task.done()):
-                    await self.cancel_active(participant_id=participant_id)
-                elif self.is_speaking:
-                    # Double interrupt while already listening/speaking
+                # Immediate barge-in cutoff: if agent is currently speaking audio, cut it off instantly (<50ms)
+                if self.state == PipelineState.TTS_SPEAKING or self.is_tts_active:
                     await self.cancel_active(participant_id=participant_id)
 
                 if not self.is_speaking:
@@ -595,30 +594,32 @@ class VoiceAudioPipeline:
                 self._final_transcript_event.clear()
 
             elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
-                # Interruption guard in case START_OF_SPEECH was missed
-                if self.state in (
-                    PipelineState.TTS_SPEAKING,
-                    PipelineState.TOOL_PENDING,
-                    PipelineState.TOOL_RUNNING,
-                    PipelineState.TOOL_COMPLETED,
-                ) or (self._current_response_task and not self._current_response_task.done()):
-                    await self.cancel_active(participant_id=participant_id)
-
-                if not self.is_speaking:
-                    self.is_speaking = True
-                    self._transition_to(
-                        PipelineState.LISTENING,
-                        "speech-start",
-                        participant_id=participant_id,
-                    )
-
                 alt_texts = [alt.text for alt in event.alternatives if alt.text]
                 if alt_texts:
-                    interim = " ".join(alt_texts)
-                    sys.stdout.write(f"\r[Deepgram ASR Interim] {interim}")
-                    sys.stdout.flush()
-                    if self.on_transcript:
-                        await self.on_transcript("user", interim)
+                    interim = " ".join(alt_texts).strip()
+                    # If actual words arrive while a tool or turn response is in-flight,
+                    # cancel the prior task as a genuine user speech barge-in.
+                    if interim:
+                        if self.state in (
+                            PipelineState.TTS_SPEAKING,
+                            PipelineState.TOOL_PENDING,
+                            PipelineState.TOOL_RUNNING,
+                            PipelineState.TOOL_COMPLETED,
+                        ) or (self._current_response_task and not self._current_response_task.done()):
+                            await self.cancel_active(participant_id=participant_id)
+
+                        if not self.is_speaking:
+                            self.is_speaking = True
+                            self._transition_to(
+                                PipelineState.LISTENING,
+                                "speech-start",
+                                participant_id=participant_id,
+                            )
+
+                        sys.stdout.write(f"\r[Deepgram ASR Interim] {interim}")
+                        sys.stdout.flush()
+                        if self.on_transcript:
+                            await self.on_transcript("user", interim)
 
             elif event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                 alt_texts = [alt.text for alt in event.alternatives if alt.text]
@@ -662,10 +663,6 @@ class VoiceAudioPipeline:
                         participant_id=participant_id,
                     )
 
-                    # Cancel any prior lingering response task
-                    if self._current_response_task and not self._current_response_task.done():
-                        self._current_response_task.cancel()
-
                     # If final transcript hasn't arrived yet from Deepgram, give it a grace window
                     if not getattr(self, "_current_utterance_transcript", None):
                         try:
@@ -682,6 +679,10 @@ class VoiceAudioPipeline:
                     if not current_tx or not current_tx.strip():
                         logger.debug("Speech ended without a final transcript for this utterance; skipping turn execution.")
                         return
+
+                    # Only cancel prior response task now that we have a valid, new non-empty utterance
+                    if self._current_response_task and not self._current_response_task.done():
+                        self._current_response_task.cancel()
 
                     request_id = f"utt-{uuid.uuid4().hex[:12]}"
                     if self._session:

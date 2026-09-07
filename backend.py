@@ -83,7 +83,7 @@ def _ensure_agent_running() -> bool:
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_DELAY: float = float(os.getenv("CHECK_AVAILABILITY_DELAY", "4.0"))
+DEFAULT_DELAY: float = float(os.getenv("CHECK_AVAILABILITY_DELAY", "0.8"))
 BACKEND_LOG_PATH: str = os.getenv("BACKEND_LOG_PATH", "logs/backend.log")
 
 # Candidate log paths — write to first that succeeds
