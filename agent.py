@@ -723,21 +723,24 @@ class VoiceAudioPipeline:
             except Exception as e:
                 logger.error(f"Error forwarding audio frames: {e}")
             finally:
-                stt_stream.end_input()
+                try:
+                    stt_stream.end_input()
+                except Exception:
+                    pass
 
         forward_task = asyncio.create_task(_forward_audio())
         try:
             await self.process_stt_events(stt_stream, participant_id=participant.identity)
         finally:
             forward_task.cancel()
-            await stt_stream.aclose()
+            try:
+                await stt_stream.aclose()
+            except Exception:
+                pass
 
 
-async def entrypoint(ctx: JobContext) -> None:
-    """LiveKit agent entrypoint."""
-    logger.info("Starting voice agent worker, connecting to LiveKit room...")
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-
+async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
+    """Initialize and run the voice audio pipeline inside any connected rtc.Room."""
     # Initialize TTS provider based on environment configuration
     tts_instance, active_provider, tts_sample_rate = create_tts_provider()
     logger.info(f"Initialized active TTS provider: '{active_provider}' at {tts_sample_rate}Hz")
@@ -746,7 +749,7 @@ async def entrypoint(ctx: JobContext) -> None:
     agent_audio_track = rtc.LocalAudioTrack.create_audio_track("agent_voice", audio_source)
 
     pub_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
-    await ctx.room.local_participant.publish_track(agent_audio_track, pub_options)
+    await room.local_participant.publish_track(agent_audio_track, pub_options)
     logger.info("Published agent audio track to room")
 
     session = SessionStateManager(log_file=os.getenv("LOG_FILE_PATH", "logs/agent.log"))
@@ -789,7 +792,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def send_data_message(payload: dict[str, Any]) -> None:
         try:
-            await ctx.room.local_participant.publish_data(
+            await room.local_participant.publish_data(
                 payload=json.dumps(payload).encode("utf-8"),
                 topic="snapback",
             )
@@ -820,15 +823,23 @@ async def entrypoint(ctx: JobContext) -> None:
     pipeline.on_transcript = on_transcript
 
     active_tasks: set[asyncio.Task] = set()
+    subscribed_tracks: set[str] = set()
 
     def subscribe_track(track: rtc.Track, participant: rtc.RemoteParticipant) -> None:
         if track.kind == rtc.TrackKind.KIND_AUDIO:
-            logger.info(f"Subscribing to audio track from participant {participant.identity}")
+            track_sid = getattr(track, "sid", "") or getattr(track, "name", "") or participant.identity
+            if track_sid in subscribed_tracks:
+                return
+            subscribed_tracks.add(track_sid)
+            logger.info(f"Subscribing to audio track from participant {participant.identity} (sid={track_sid})")
             task = asyncio.create_task(pipeline.handle_participant_track(track, participant))
             active_tasks.add(task)
-            task.add_done_callback(active_tasks.discard)
+            def _cleanup(t: asyncio.Task) -> None:
+                active_tasks.discard(t)
+                subscribed_tracks.discard(track_sid)
+            task.add_done_callback(_cleanup)
 
-    @ctx.room.on("track_subscribed")
+    @room.on("track_subscribed")
     def on_track_subscribed(
         track: rtc.Track,
         publication: rtc.TrackPublication,
@@ -836,12 +847,27 @@ async def entrypoint(ctx: JobContext) -> None:
     ) -> None:
         subscribe_track(track, participant)
 
-    for participant in ctx.room.remote_participants.values():
+    for participant in room.remote_participants.values():
         for publication in participant.track_publications.values():
             if publication.track and publication.track.kind == rtc.TrackKind.KIND_AUDIO:
                 subscribe_track(publication.track, participant)
 
     logger.info(f"Voice agent ready (active_tts_provider={pipeline.active_tts_provider}).")
+    return pipeline
+
+
+async def entrypoint(ctx: JobContext) -> None:
+    """LiveKit agent entrypoint."""
+    logger.info("Starting voice agent worker, connecting to LiveKit room...")
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+
+    @ctx.room.on("disconnected")
+    def on_disconnected(reason: Any = None) -> None:
+        logger.info(f"Room disconnected ({reason}). Exiting process.")
+        os._exit(0)
+
+    await run_agent_in_room(ctx.room)
+
 
 
 def main() -> None:

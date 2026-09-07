@@ -1,15 +1,79 @@
-import subprocess
+import asyncio
+import logging
+import os
 import sys
 import time
+from typing import Any, Optional
 
-while True:
+from dotenv import load_dotenv
+from livekit import api, rtc
+from livekit.agents.utils import http_context
+
+from agent import run_agent_in_room
+
+load_dotenv()
+logger = logging.getLogger("snapback-agent-runner")
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
+
+ROOM_NAME = os.getenv("ROOM_NAME", "snapback-call")
+LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
+LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
+LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
+
+
+async def run_agent_loop() -> None:
+    """Resilient agent loop connecting directly to room with auto-reconnect."""
+    while True:
+        try:
+            logger.info("Connecting directly to LiveKit room '%s'...", ROOM_NAME)
+            token = (
+                api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+                .with_identity("snapback-voice-agent")
+                .with_grants(
+                    api.VideoGrants(
+                        room_join=True,
+                        room=ROOM_NAME,
+                        can_publish=True,
+                        can_subscribe=True,
+                        can_publish_data=True,
+                    )
+                )
+                .to_jwt()
+            )
+
+            room = rtc.Room()
+            disconnect_event = asyncio.Event()
+
+            @room.on("disconnected")
+            def on_disconnected(reason: Any = None) -> None:
+                logger.info("Room disconnected (%s). Triggering auto-reconnect...", reason)
+                disconnect_event.set()
+
+            async with http_context.open():
+                await room.connect(LIVEKIT_URL, token)
+                logger.info("Successfully connected to '%s'! Initializing voice pipeline...", ROOM_NAME)
+                pipeline = await run_agent_in_room(room)
+                logger.info("Agent is live and active in room '%s' (active_tts_provider=%s).", ROOM_NAME, pipeline.active_tts_provider)
+                await disconnect_event.wait()
+
+            logger.info("Cleaning up before reconnecting...")
+            await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            logger.info("Agent loop cancelled.")
+            break
+        except Exception as e:
+            logger.error("Agent loop exception: %s. Reconnecting in 2s...", e)
+            await asyncio.sleep(2)
+
+
+def main() -> None:
     try:
-        print("[run_agent] Starting agent connect --room snapback-call...")
-        proc = subprocess.run([sys.executable, "agent.py", "connect", "--room", "snapback-call"])
-        print(f"[run_agent] Agent exited with code {proc.returncode}. Reconnecting in 1s...")
-        time.sleep(1)
+        asyncio.run(run_agent_loop())
     except KeyboardInterrupt:
-        break
-    except Exception as e:
-        print(f"[run_agent] Error: {e}. Retrying in 2s...")
-        time.sleep(2)
+        pass
+
+
+if __name__ == "__main__":
+    main()
+
