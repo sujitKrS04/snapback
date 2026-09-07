@@ -66,12 +66,12 @@ def _patch_rime_chunk_alignment() -> None:
 
         async def _safe_run(self: Any, output_emitter: Any) -> None:
             orig_push = output_emitter.push
-            remainder = b""
+            remainder: bytes = b""
 
             def _aligned_push(data: bytes | bytearray) -> None:
                 nonlocal remainder
                 bdata = bytes(data)
-                if remainder:
+                if len(remainder) > 0:
                     bdata = remainder + bdata
                     remainder = b""
                 if len(bdata) % 2 != 0:
@@ -84,7 +84,7 @@ def _patch_rime_chunk_alignment() -> None:
             try:
                 await orig_run(self, output_emitter)
             finally:
-                if remainder:
+                if len(remainder) > 0:
                     orig_push(remainder + b"\x00")
 
         rime_tts.ChunkedStream._run = _safe_run
@@ -805,7 +805,7 @@ class VoiceAudioPipeline:
         """Attach to participant audio track and stream frames into Deepgram STT with auto-reconnect resilience."""
         audio_stream = rtc.AudioStream(track)
 
-        while not asyncio.current_task().cancelled():
+        while True:
             try:
                 dg_stt = stt_instance or deepgram.STT(
                     model=os.getenv("DEEPGRAM_MODEL", "nova-3"),
