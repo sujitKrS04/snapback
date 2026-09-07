@@ -142,9 +142,21 @@ Open `http://localhost:5173/` in your browser to start a full-duplex conversatio
 ### 2. Audio Pipeline & Distortion Hardening
 - **16-bit PCM Chunk Alignment**: When streaming raw 16-bit linear PCM (`audio/pcm`), network chunk fragmentation can yield odd byte boundaries. Snapback integrates an automatic even-byte chunk alignment buffer (`_patch_rime_chunk_alignment()`), preventing sample transposition and eliminating crackling/buzzing distortion.
 - **Native Playout Synchronization**: Uses `AudioSource.wait_for_playout()` rather than manual sleep timers, ensuring that HTTP synthesis latency is not subtracted from speech duration and preventing sentences from cutting off mid-speech.
+- **Fallback Turn Debounce & Utterance End**: Employs a 750ms silence debounce timer and `utterance_end_ms=1000` on Deepgram streaming STT, guaranteeing turn completion and prompt voice replies even in environments with ambient microphone noise.
+- **Resilient STT Stream Loop**: Continuous reconnection supervisor in `handle_participant_track` ensuring uninterrupted speech recognition across WebSocket drops or network reconnects.
 - **Singleton Process Protection**: Enforces a PID lockfile (`logs/agent.pid`) and process guards in `run_agent.py` and `backend.py`, preventing duplicate agent workers from connecting to the same room and conflicting on STT streams.
 - **Dynamic Participant Lifecycle**: Automatically cleans up and cancels STT tasks on `@room.on("participant_disconnected")` and `@room.on("track_unsubscribed")`, eliminating ghost listener tasks across call reconnects.
 - **DOM Audio Stacking Prevention**: Automatically manages `<audio>` element lifecycles in `useLiveKit.ts`, ensuring zero audio element duplication or comb-filter phase cancellation distortion.
+
+---
+
+## Live Demonstrations & Video Artifacts
+
+Three live demonstration video recordings captured directly from the physical hardware microphone, WebRTC live room (`snapback-call`), and Snapback Studio frontend:
+
+1. **[`live_demo_1.mp4`](live_demo_1.mp4)**: Complete conversational appointment booking flow with live Deepgram ASR, Rime Coda synthesis, and instant voice interruptions.
+2. **[`live_demo_2.mp4`](live_demo_2.mp4)**: Interactive barge-in and quick-prompt chip testing demonstrating sub-50ms audio cancellations during active tool execution and speech.
+3. **[`live_demo_3.mp4`](live_demo_3.mp4)**: Full-duplex conversational voice turn transitions, resilient participant reconnection, and real-time SSE latency telemetry.
 
 ---
 

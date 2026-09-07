@@ -42,6 +42,7 @@ export function CallScreen({ onReturnToIntro }: CallScreenProps) {
   );
 
   const {
+    room,
     connectionState,
     isMicrophoneEnabled,
     connect,

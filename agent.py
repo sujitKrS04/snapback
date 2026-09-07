@@ -332,6 +332,7 @@ class VoiceAudioPipeline:
 
         # Tasks and concurrency management
         self._current_response_task: Optional[asyncio.Task] = None
+        self._fallback_turn_task: Optional[asyncio.Task] = None
         self._cancel_lock = asyncio.Lock()
         self._final_transcript_event = asyncio.Event()
         self._current_utterance_transcript: Optional[str] = None
@@ -445,6 +446,9 @@ class VoiceAudioPipeline:
                     self.audio_source.clear_queue()
                 except Exception as e:
                     logger.debug(f"Error clearing AudioSource queue: {e}")
+
+            if self._fallback_turn_task and not self._fallback_turn_task.done():
+                self._fallback_turn_task.cancel()
 
             if task_to_cancel:
                 await asyncio.gather(task_to_cancel, return_exceptions=True)
@@ -624,6 +628,71 @@ class VoiceAudioPipeline:
             except asyncio.CancelledError:
                 pass
 
+    async def _fallback_turn_trigger(self, participant_id: Optional[str] = None) -> None:
+        """Fallback turn trigger if Deepgram VAD endpointing does not deliver END_OF_SPEECH."""
+        try:
+            await asyncio.sleep(0.75)
+            if self.is_speaking and self._current_utterance_transcript and self._current_utterance_transcript.strip():
+                logger.info("Fallback turn debounce timer triggered; concluding turn.")
+                await self._conclude_speech_turn(participant_id=participant_id)
+        except asyncio.CancelledError:
+            pass
+
+    async def _conclude_speech_turn(self, participant_id: Optional[str] = None) -> None:
+        """Conclude speech turn safely and trigger response execution."""
+        if self._fallback_turn_task and not self._fallback_turn_task.done():
+            self._fallback_turn_task.cancel()
+
+        if not self.is_speaking and not getattr(self, "_current_utterance_transcript", None):
+            return
+
+        self.is_speaking = False
+
+        # If final transcript hasn't arrived yet from Deepgram, give it a grace window
+        if not getattr(self, "_current_utterance_transcript", None):
+            try:
+                await asyncio.wait_for(self._final_transcript_event.wait(), timeout=0.6)
+            except asyncio.TimeoutError:
+                pass
+
+        # Strictly require a non-empty final transcript from the current utterance.
+        current_tx = getattr(self, "_current_utterance_transcript", None)
+        self._current_utterance_transcript = None
+
+        if not current_tx or not current_tx.strip():
+            logger.debug("Speech ended without a final transcript for this utterance; skipping turn execution.")
+            # If agent is currently speaking, preserve TTS_SPEAKING state so voice playback does not break
+            if not (self.is_tts_active or self.state == PipelineState.TTS_SPEAKING):
+                self._transition_to(
+                    PipelineState.IDLE,
+                    "speech-end",
+                    participant_id=participant_id,
+                )
+            return
+
+        # Only cancel prior response task now that we have a valid, new non-empty utterance
+        if self._current_response_task and not self._current_response_task.done():
+            self._current_response_task.cancel()
+
+        self._transition_to(
+            PipelineState.IDLE,
+            "speech-end",
+            participant_id=participant_id,
+        )
+
+        request_id = f"utt-{uuid.uuid4().hex[:12]}"
+        if self._session:
+            request_id = self._session.issue_request(request_id)
+
+        # Launch managed turn response asynchronously
+        self._current_response_task = asyncio.create_task(
+            self._execute_turn_response(
+                participant_id=participant_id,
+                transcript=current_tx,
+                request_id=request_id,
+            )
+        )
+
     async def process_stt_events(
         self,
         stt_stream: stt.RecognizeStream,
@@ -648,14 +717,18 @@ class VoiceAudioPipeline:
                         "speech-start",
                         participant_id=participant_id,
                     )
-                # Reset per-utterance transcript accumulator and clear event
-                self._current_utterance_transcript = None
-                self._final_transcript_event.clear()
+                    # Only reset per-utterance transcript accumulator when beginning a new utterance
+                    self._current_utterance_transcript = None
+                    self._final_transcript_event.clear()
 
             elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
                 alt_texts = [alt.text for alt in event.alternatives if alt.text]
                 if alt_texts:
                     interim = " ".join(alt_texts).strip()
+                    # Cancel any active fallback turn timer since speech is continuing
+                    if self._fallback_turn_task and not self._fallback_turn_task.done():
+                        self._fallback_turn_task.cancel()
+
                     # If actual spoken words arrive while a tool or TTS playback is in-flight,
                     # immediately cancel active playback (<50ms) as a genuine voice barge-in.
                     if interim:
@@ -694,6 +767,14 @@ class VoiceAudioPipeline:
                         ) or (self._current_response_task and not self._current_response_task.done()):
                             await self.cancel_active(participant_id=participant_id)
 
+                        if not self.is_speaking:
+                            self.is_speaking = True
+                            self._transition_to(
+                                PipelineState.LISTENING,
+                                "speech-start",
+                                participant_id=participant_id,
+                            )
+
                         if self._current_utterance_transcript:
                             self._current_utterance_transcript = f"{self._current_utterance_transcript} {final_text}".strip()
                         else:
@@ -705,74 +786,15 @@ class VoiceAudioPipeline:
                         if self.on_transcript:
                             await self.on_transcript("user", final_text)
 
-                        # If speech already ended and agent is currently idle, trigger turn response immediately
-                        if not self.is_speaking and self.state == PipelineState.IDLE:
-                            if self._current_response_task is None or self._current_response_task.done():
-                                current_tx = self._current_utterance_transcript
-                                self._current_utterance_transcript = None
-                                if current_tx and current_tx.strip():
-                                    request_id = f"utt-{uuid.uuid4().hex[:12]}"
-                                    if self._session:
-                                        request_id = self._session.issue_request(request_id)
-                                    self._current_response_task = asyncio.create_task(
-                                        self._execute_turn_response(
-                                            participant_id=participant_id,
-                                            transcript=current_tx,
-                                            request_id=request_id,
-                                        )
-                                    )
+                        # Schedule fallback turn timer (750ms) in case Deepgram VAD doesn't emit END_OF_SPEECH
+                        if self._fallback_turn_task and not self._fallback_turn_task.done():
+                            self._fallback_turn_task.cancel()
+                        self._fallback_turn_task = asyncio.create_task(
+                            self._fallback_turn_trigger(participant_id=participant_id)
+                        )
 
             elif event.type == stt.SpeechEventType.END_OF_SPEECH:
-                if self.is_speaking:
-                    self.is_speaking = False
-
-                    # If final transcript hasn't arrived yet from Deepgram, give it a grace window
-                    if not getattr(self, "_current_utterance_transcript", None):
-                        try:
-                            await asyncio.wait_for(self._final_transcript_event.wait(), timeout=0.6)
-                        except asyncio.TimeoutError:
-                            pass
-
-                    # Strictly require a non-empty final transcript from the current utterance.
-                    # Interim transcripts, empty VAD clicks, or stale prior transcripts
-                    # must NEVER trigger turn response or tool execution.
-                    current_tx = getattr(self, "_current_utterance_transcript", None)
-                    self._current_utterance_transcript = None
-
-                    if not current_tx or not current_tx.strip():
-                        logger.debug("Speech ended without a final transcript for this utterance; skipping turn execution.")
-                        # If agent is currently speaking, preserve TTS_SPEAKING state so voice playback does not break
-                        if not (self.is_tts_active or self.state == PipelineState.TTS_SPEAKING):
-                            self._transition_to(
-                                PipelineState.IDLE,
-                                "speech-end",
-                                participant_id=participant_id,
-                            )
-                        return
-
-                    # Only cancel prior response task now that we have a valid, new non-empty utterance
-                    if self._current_response_task and not self._current_response_task.done():
-                        self._current_response_task.cancel()
-
-                    self._transition_to(
-                        PipelineState.IDLE,
-                        "speech-end",
-                        participant_id=participant_id,
-                    )
-
-                    request_id = f"utt-{uuid.uuid4().hex[:12]}"
-                    if self._session:
-                        request_id = self._session.issue_request(request_id)
-
-                    # Launch managed turn response asynchronously
-                    self._current_response_task = asyncio.create_task(
-                        self._execute_turn_response(
-                            participant_id=participant_id,
-                            transcript=current_tx,
-                            request_id=request_id,
-                        )
-                    )
-
+                await self._conclude_speech_turn(participant_id=participant_id)
 
     async def handle_participant_track(
         self,
@@ -780,41 +802,53 @@ class VoiceAudioPipeline:
         participant: rtc.RemoteParticipant,
         stt_instance: Optional[stt.STT] = None,
     ) -> None:
-        """Attach to participant audio track and stream frames into Deepgram STT."""
+        """Attach to participant audio track and stream frames into Deepgram STT with auto-reconnect resilience."""
         audio_stream = rtc.AudioStream(track)
-        dg_stt = stt_instance or deepgram.STT(
-            model=os.getenv("DEEPGRAM_MODEL", "nova-3"),
-            language="en-US",
-            vad_events=True,
-            interim_results=True,
-            punctuate=True,
-            endpointing_ms=300,
-        )
-        stt_stream = dg_stt.stream()
 
-        async def _forward_audio() -> None:
+        while not asyncio.current_task().cancelled():
             try:
-                async for event in audio_stream:
-                    stt_stream.push_frame(event.frame)
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.error(f"Error forwarding audio frames: {e}")
-            finally:
+                dg_stt = stt_instance or deepgram.STT(
+                    model=os.getenv("DEEPGRAM_MODEL", "nova-3"),
+                    language="en-US",
+                    vad_events=True,
+                    interim_results=True,
+                    punctuate=True,
+                    endpointing_ms=300,
+                    utterance_end_ms=1000,
+                )
+                stt_stream = dg_stt.stream()
+
+                async def _forward_audio() -> None:
+                    try:
+                        async for event in audio_stream:
+                            stt_stream.push_frame(event.frame)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"Error forwarding audio frames: {e}")
+                    finally:
+                        try:
+                            stt_stream.end_input()
+                        except Exception:
+                            pass
+
+                forward_task = asyncio.create_task(_forward_audio())
                 try:
-                    stt_stream.end_input()
-                except Exception:
-                    pass
+                    await self.process_stt_events(stt_stream, participant_id=participant.identity)
+                finally:
+                    forward_task.cancel()
+                    try:
+                        await stt_stream.aclose()
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"STT stream exception for participant {participant.identity}: {exc}. Reconnecting STT in 500ms...")
+                await asyncio.sleep(0.5)
 
-        forward_task = asyncio.create_task(_forward_audio())
-        try:
-            await self.process_stt_events(stt_stream, participant_id=participant.identity)
-        finally:
-            forward_task.cancel()
-            try:
-                await stt_stream.aclose()
-            except Exception:
-                pass
+            if stt_instance is not None:
+                break
 
 
 async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
@@ -931,10 +965,19 @@ async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
         if task and not task.done():
             logger.info(f"Cancelling audio stream for participant {identity}")
             task.cancel()
+        pipeline.is_speaking = False
+        pipeline._current_utterance_transcript = None
+        if pipeline._fallback_turn_task and not pipeline._fallback_turn_task.done():
+            pipeline._fallback_turn_task.cancel()
+        if pipeline.state in (PipelineState.LISTENING, PipelineState.TOOL_PENDING):
+            pipeline._transition_to(PipelineState.IDLE, "participant-reset")
 
     def subscribe_track(track: rtc.Track, participant: rtc.RemoteParticipant) -> None:
         if track.kind == rtc.TrackKind.KIND_AUDIO:
-            # Snapback is a 1-on-1 call session; cancel any prior participant tasks
+            curr = active_participant_tasks.get(participant.identity)
+            if curr and not curr.done():
+                return
+
             for old_id in list(active_participant_tasks.keys()):
                 if old_id != participant.identity:
                     logger.info(f"Cleaning up prior participant {old_id} before attaching {participant.identity}")
@@ -946,6 +989,10 @@ async def run_agent_in_room(room: rtc.Room) -> VoiceAudioPipeline:
             active_participant_tasks[participant.identity] = task
 
             def _cleanup(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    logger.debug(f"Audio stream task for participant {participant.identity} cancelled")
+                elif t.exception():
+                    logger.error(f"Audio stream task for participant {participant.identity} failed: {t.exception()}", exc_info=t.exception())
                 if active_participant_tasks.get(participant.identity) is t:
                     active_participant_tasks.pop(participant.identity, None)
 
