@@ -578,10 +578,10 @@ class VoiceAudioPipeline:
         """
         async for event in stt_stream:
             if event.type == stt.SpeechEventType.START_OF_SPEECH:
-                # Immediate barge-in cutoff: if agent is currently speaking audio, cut it off instantly (<50ms)
-                if self.state == PipelineState.TTS_SPEAKING or self.is_tts_active:
-                    await self.cancel_active(participant_id=participant_id)
-
+                # VAD detected audio energy: mark speaking state and reset accumulator.
+                # Note: We do NOT cancel active TTS or tools on raw VAD energy alone,
+                # because speaker acoustic echo or ambient room noise triggers VAD energy
+                # with zero spoken words and would cut off the agent's speech mid-sentence.
                 if not self.is_speaking:
                     self.is_speaking = True
                     self._transition_to(
@@ -597,8 +597,8 @@ class VoiceAudioPipeline:
                 alt_texts = [alt.text for alt in event.alternatives if alt.text]
                 if alt_texts:
                     interim = " ".join(alt_texts).strip()
-                    # If actual words arrive while a tool or turn response is in-flight,
-                    # cancel the prior task as a genuine user speech barge-in.
+                    # If actual spoken words arrive while a tool or TTS playback is in-flight,
+                    # immediately cancel active playback (<50ms) as a genuine voice barge-in.
                     if interim:
                         if self.state in (
                             PipelineState.TTS_SPEAKING,
@@ -626,6 +626,15 @@ class VoiceAudioPipeline:
                 if alt_texts:
                     final_text = " ".join(alt_texts).strip()
                     if final_text:
+                        # If interim was skipped or single-word final arrived during active TTS/tool, cancel active
+                        if self.state in (
+                            PipelineState.TTS_SPEAKING,
+                            PipelineState.TOOL_PENDING,
+                            PipelineState.TOOL_RUNNING,
+                            PipelineState.TOOL_COMPLETED,
+                        ) or (self._current_response_task and not self._current_response_task.done()):
+                            await self.cancel_active(participant_id=participant_id)
+
                         if self._current_utterance_transcript:
                             self._current_utterance_transcript = f"{self._current_utterance_transcript} {final_text}".strip()
                         else:

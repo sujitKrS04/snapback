@@ -142,7 +142,11 @@ export function useLiveKit(): UseLiveKitReturn {
       await room.connect(url, token);
       setConnectionState(ConnectionState.Connected);
 
-      await room.localParticipant.setMicrophoneEnabled(true);
+      await room.localParticipant.setMicrophoneEnabled(true, {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
       setIsMicrophoneEnabled(true);
     } catch (err) {
       console.error("Failed to connect to LiveKit room:", err);
@@ -168,7 +172,11 @@ export function useLiveKit(): UseLiveKitReturn {
     const room = roomRef.current;
     if (!room) return;
     const enabled = !room.localParticipant.isMicrophoneEnabled;
-    await room.localParticipant.setMicrophoneEnabled(enabled);
+    await room.localParticipant.setMicrophoneEnabled(enabled, {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    });
     setIsMicrophoneEnabled(enabled);
   }, []);
 
