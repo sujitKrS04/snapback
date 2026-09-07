@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import psutil
 import subprocess
 import sys
 import time
@@ -38,12 +39,30 @@ logger = logging.getLogger("snapback-backend")
 _agent_process: Optional[subprocess.Popen] = None
 
 
+def is_agent_process_running() -> bool:
+    """Check if any agent.py or run_agent.py process is active across the system."""
+    global _agent_process
+    if _agent_process is not None and _agent_process.poll() is None:
+        return True
+    try:
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmdline = " ".join(proc.info.get("cmdline") or [])
+                if "agent.py" in cmdline or "run_agent.py" in cmdline:
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+    return False
+
+
 def _ensure_agent_running() -> bool:
     """Ensure run_agent.py is running in the background to serve incoming LiveKit calls."""
     global _agent_process
     if os.getenv("SNAPBACK_AUTO_SPAWN_AGENT", "true").lower() == "false":
         return False
-    if _agent_process is not None and _agent_process.poll() is None:
+    if is_agent_process_running():
         return True
     try:
         run_agent_script = Path(__file__).parent / "run_agent.py"
@@ -370,11 +389,10 @@ async def get_token(body: TokenRequest) -> TokenResponse:
 @app.get("/agent-status", tags=["livekit"])
 async def agent_status() -> dict[str, Any]:
     """Check whether the agent supervisor process is actively running."""
-    global _agent_process
-    is_running = _agent_process is not None and _agent_process.poll() is None
+    is_running = is_agent_process_running()
     return {
         "agent_running": is_running,
-        "pid": _agent_process.pid if is_running and _agent_process else None,
+        "pid": _agent_process.pid if _agent_process and _agent_process.poll() is None else None,
     }
 
 
