@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ConnectionState } from "livekit-client";
 import { useCallState } from "../hooks/useCallState";
@@ -10,21 +10,32 @@ import { StateIndicator } from "./StateIndicator";
 import { TranscriptPanel } from "./TranscriptPanel";
 import { LiveWaveform } from "./LiveWaveform";
 import { SystemLogPanel } from "./SystemLogPanel";
+import { ThemeToggle } from "./ThemeToggle";
+
+interface CallScreenProps {
+  onReturnToIntro?: () => void;
+}
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const ROOM_NAME = import.meta.env.VITE_ROOM_NAME ?? "snapback-call";
 
-export function CallScreen() {
+const QUICK_BARGE_PROMPTS = [
+  "Wait, check Friday instead",
+  "Actually, cancel that booking",
+  "Hold on, what time was that?",
+  "Let's switch to 2:00 PM",
+];
+
+export function CallScreen({ onReturnToIntro }: CallScreenProps) {
   const stateMachine = useCallState();
   const { syncState } = stateMachine;
   const [isConnecting, setIsConnecting] = useState(false);
   const [interruptFlashKey, setInterruptFlashKey] = useState(0);
-  const [isDark, setIsDark] = useState(() =>
-    document.documentElement.dataset.theme !== "light",
-  );
   const prevEventCountRef = useRef(0);
   const [recentLatency, setRecentLatency] = useState<number | null>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<"transcript" | "logs">("transcript");
+  const [copiedPrompt, setCopiedPrompt] = useState<string | null>(null);
 
   const { events, status: eventStatus } = useEventStream(
     `${API_BASE}/events?tail=300`,
@@ -45,6 +56,14 @@ export function CallScreen() {
   const agentLevels = useWaveform(agentTrack);
 
   const isConnected = connectionState === ConnectionState.Connected;
+
+  // Compute dynamic audio level for the Acoustic Resonator
+  const activeAudioLevel =
+    stateMachine.state === "speaking"
+      ? (agentLevels.length ? Math.max(...agentLevels) : 0)
+      : stateMachine.state === "listening"
+      ? (micLevels.length ? Math.max(...micLevels) : 0)
+      : 0;
 
   // Drive state machine from the real event stream
   useEffect(() => {
@@ -77,7 +96,7 @@ export function CallScreen() {
     const el = waveformRef.current;
     if (!el) return;
     el.classList.remove("waveform-snap-flash");
-    void el.offsetWidth; // force reflow
+    void el.offsetWidth;
     el.classList.add("waveform-snap-flash");
   }, [interruptFlashKey]);
 
@@ -175,15 +194,6 @@ export function CallScreen() {
     }
   };
 
-  const handleToggleTheme = useCallback(() => {
-    setIsDark((d) => {
-      const next = !d;
-      document.documentElement.dataset.theme = next ? "dark" : "light";
-      try { localStorage.setItem("snapback-theme", next ? "dark" : "light"); } catch {}
-      return next;
-    });
-  }, []);
-
   async function handleStartCall() {
     if (isConnected) {
       await disconnect();
@@ -208,6 +218,14 @@ export function CallScreen() {
     }
   }
 
+  const handleCopyPrompt = (prompt: string) => {
+    try {
+      navigator.clipboard.writeText(prompt);
+      setCopiedPrompt(prompt);
+      setTimeout(() => setCopiedPrompt(null), 2500);
+    } catch {}
+  };
+
   const streamStatus =
     eventStatus === "connected" ? "live"
     : eventStatus === "reconnecting" ? "reconnecting..."
@@ -215,206 +233,278 @@ export function CallScreen() {
     : "disconnected";
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-start px-4 responsive-py responsive-px sm:px-6">
-      <div className="flex w-full max-w-lg flex-col items-center gap-6 responsive-gap pt-4 sm:gap-8">
-        {/* Header */}
-        <motion.header
-          initial={{ opacity: 0, y: -12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-          className="flex w-full items-center justify-between"
-        >
-          <h1 className="font-display text-xl font-semibold tracking-tight text-[var(--text-primary)] sm:text-2xl">
-            Snapback
-          </h1>
-          <div className="flex items-center gap-3">
+    <div className="flex min-h-screen flex-col items-center justify-start px-4 py-6 sm:px-8 max-w-5xl mx-auto">
+      {/* Top Header Bar */}
+      <header className="flex w-full items-center justify-between border-b border-[var(--border-subtle)] pb-4 mb-6">
+        <div className="flex items-center gap-3">
+          {onReturnToIntro && (
             <button
-              onClick={isRecording ? stopRecording : startRecording}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition-all ${
-                isRecording
-                  ? "bg-red-500/20 text-red-400 border border-red-500/50 animate-pulse"
-                  : "bg-[var(--surface-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-subtle)]"
-              }`}
-              title={isRecording ? "Stop recording video" : "Record demo clip (.webm) with mic and Rime audio"}
+              onClick={onReturnToIntro}
+              className="font-mono text-xs px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-surface-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-1.5 cursor-pointer"
+              title="Return to Overview"
             >
-              <span className={`inline-block h-2 w-2 rounded-full ${isRecording ? "bg-red-500" : "bg-zinc-400"}`} />
-              {isRecording ? "Recording..." : "Record Clip (.webm)"}
+              <span>←</span>
+              <span className="hidden sm:inline">Overview</span>
             </button>
-            {isConnected && (
-              <span className="provider-badge">Active speech provider: Rime</span>
-            )}
-            <button
-              onClick={handleToggleTheme}
-              className="theme-toggle"
-              aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-              title={isDark ? "Light mode" : "Dark mode"}
-            />
+          )}
+
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-[var(--accent)] flex items-center justify-center text-white font-bold text-sm">
+              S
+            </div>
+            <div>
+              <h1 className="font-display text-base font-bold tracking-tight text-[var(--text-primary)] leading-tight">
+                Snapback Studio
+              </h1>
+              <div className="font-mono text-[10px] text-[var(--text-muted)]">
+                {ROOM_NAME}
+              </div>
+            </div>
           </div>
-        </motion.header>
+        </div>
 
-        {/* Connecting choreography (shown instead of spinner) */}
-        <AnimatePresence mode="wait">
-          {isConnecting && !isConnected && (
-            <motion.div
-              key="choreo"
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-              className="flex flex-col items-center gap-4"
-            >
-              <motion.div
-                className="relative"
-                style={{ width: 80, height: 80 }}
-              >
-                <motion.div
-                  className="absolute inset-0 rounded-full border-2 border-[var(--accent)]"
-                  style={{ borderTopColor: "transparent", borderRightColor: "transparent" }}
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 1.2, repeat: Infinity, ease: "linear" }}
-                />
-                <motion.div
-                  className="absolute inset-2 rounded-full border-2 border-[var(--state-listening)]"
-                  style={{ borderBottomColor: "transparent", borderLeftColor: "transparent" }}
-                  animate={{ rotate: -360 }}
-                  transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }}
-                />
-              </motion.div>
-              <motion.span
-                className="text-sm font-medium text-[var(--text-secondary)] choreo-pulse"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-              >
-                Establishing connection…
-              </motion.span>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* State indicator */}
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
-        >
-          <StateIndicator
-            state={stateMachine.state}
-            interruptFlashKey={interruptFlashKey}
-            size={160}
-          />
-        </motion.div>
-
-        {/* Connection + stream status */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.4, delay: 0.2 }}
-          className="flex flex-col items-center gap-1 text-xs text-[var(--text-secondary)]"
-        >
-          <p>
-            {isConnected ? "Connected" : "Disconnected"}
-            {isConnected && ` \u00b7 ${ROOM_NAME}`}
-          </p>
-          <p>Event stream: {streamStatus}</p>
-        </motion.div>
-
-        {/* Waveforms */}
-        {isConnected && (
-          <motion.div
-            ref={waveformRef}
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.4, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
-            className="grid w-full grid-cols-2 gap-3 responsive-gap"
-          >
-            <LiveWaveform
-              levels={micLevels}
-              color="var(--state-listening)"
-              label="You"
-              onSnap={interruptFlashKey > 0}
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Status chips */}
+          <span className="hidden md:inline-flex items-center gap-1.5 font-mono text-[11px] px-2.5 py-1 rounded-full bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)]">
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                streamStatus === "live" ? "bg-emerald-500 animate-pulse" : "bg-zinc-500"
+              }`}
             />
-            <LiveWaveform
-              levels={agentLevels}
-              color="var(--state-speaking)"
-              label="Agent"
-              onSnap={interruptFlashKey > 0}
-            />
-          </motion.div>
-        )}
-
-        {/* Live latency readout */}
-        <AnimatePresence>
-          {recentLatency !== null && (
-            <motion.div
-              initial={{ opacity: 0, y: 8, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -8, scale: 0.95 }}
-              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-              className="flex items-center gap-2 rounded-full bg-[var(--accent-soft)] px-4 py-2"
-            >
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-secondary)]">
-                Interrupt latency
-              </span>
-              <span className="latency-readout text-lg font-bold tabular-nums text-[var(--accent)]">
-                {recentLatency.toFixed(1)}ms
-              </span>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Controls */}
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4, delay: 0.35 }}
-          className="flex gap-3"
-        >
-          <motion.button
-            onClick={handleStartCall}
-            disabled={isConnecting}
-            whileTap={{ scale: 0.96 }}
-            whileHover={{ scale: 1.02 }}
-            className="btn-press rounded-full px-8 py-3.5 text-sm font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{
-              backgroundColor: isConnected ? "var(--state-interrupted)" : "var(--accent)",
-            }}
-          >
-            {isConnecting ? "Connecting…" : isConnected ? "End Call" : "Start Call"}
-          </motion.button>
+            SSE: {streamStatus}
+          </span>
 
           {isConnected && (
-            <motion.button
-              onClick={toggleMicrophone}
-              whileTap={{ scale: 0.96 }}
-              whileHover={{ scale: 1.02 }}
-              className="btn-press rounded-full border border-[var(--border-color)] px-5 py-3.5 text-sm font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-surface-hover)]"
-            >
-              {isMicrophoneEnabled ? "Mute" : "Unmute"}
-            </motion.button>
+            <span className="hidden sm:inline-flex font-mono text-[11px] px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-500 font-semibold">
+              Rime Coda TTS
+            </span>
           )}
-        </motion.div>
 
-        {/* Transcript — slide-in panel */}
-        <motion.div
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: "auto" }}
-          transition={{ duration: 0.4, delay: 0.4, ease: [0.22, 1, 0.36, 1] }}
-          className="w-full overflow-hidden"
-        >
-          <TranscriptPanel transcripts={transcripts} />
-        </motion.div>
+          {/* Record button */}
+          <button
+            onClick={isRecording ? stopRecording : startRecording}
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+              isRecording
+                ? "bg-red-500/20 text-red-500 border border-red-500/50 animate-pulse shadow-md"
+                : "glass-card text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-subtle)]"
+            }`}
+            title={isRecording ? "Stop recording video" : "Record demo clip (.webm)"}
+          >
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${
+                isRecording ? "bg-red-500" : "bg-zinc-400"
+              }`}
+            />
+            <span>{isRecording ? "REC 00:Live" : "Record Clip"}</span>
+          </button>
 
-        {/* System log — slide-in panel */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4, delay: 0.45, ease: [0.22, 1, 0.36, 1] }}
-          className="w-full"
-        >
-          <SystemLogPanel events={events} />
-        </motion.div>
+          <ThemeToggle />
+        </div>
+      </header>
+
+      {/* Main Studio Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full items-start">
+        {/* Left Column: Resonator & Live Hardware Stage (col-span-7) */}
+        <div className="lg:col-span-6 flex flex-col items-center gap-6">
+          {/* Acoustic Resonator */}
+          <div className="glass-card w-full flex flex-col items-center justify-center p-8 rounded-3xl border border-[var(--border-subtle)] relative overflow-hidden">
+            {/* Background radial gradient */}
+            <div className="absolute inset-0 bg-radial from-[var(--accent)]/5 to-transparent pointer-events-none" />
+
+            <StateIndicator
+              state={stateMachine.state}
+              interruptFlashKey={interruptFlashKey}
+              audioLevel={activeAudioLevel}
+              size={180}
+            />
+
+            {/* Connecting animation */}
+            <AnimatePresence>
+              {isConnecting && !isConnected && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="mt-4 flex items-center gap-2 text-xs font-mono text-[var(--text-secondary)]"
+                >
+                  <span className="w-2 h-2 rounded-full bg-[var(--accent)] animate-ping" />
+                  Negotiating WebRTC handshake…
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Recent Latency Pill */}
+            <AnimatePresence>
+              {recentLatency !== null && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.9, y: -10 }}
+                  className="mt-4 inline-flex items-center gap-2 rounded-full bg-red-500/10 border border-red-500/30 px-3.5 py-1.5 shadow-lg"
+                >
+                  <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                  <span className="font-mono text-[11px] font-bold text-red-500">
+                    Barge-In Cancel: {recentLatency.toFixed(1)}ms
+                  </span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Primary Call Controls */}
+          <div className="flex items-center gap-3 w-full justify-center">
+            <button
+              onClick={handleStartCall}
+              disabled={isConnecting}
+              className={`btn-tactile px-8 py-3.5 rounded-full text-sm font-semibold transition-all shadow-lg cursor-pointer flex items-center gap-2 ${
+                isConnected
+                  ? "bg-red-500 hover:bg-red-600 text-white shadow-red-500/20"
+                  : ""
+              }`}
+            >
+              {isConnecting ? (
+                <>
+                  <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>Connecting…</span>
+                </>
+              ) : isConnected ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
+                  <span>End Studio Call</span>
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 00-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                  </svg>
+                  <span>Start Live Session</span>
+                </>
+              )}
+            </button>
+
+            {isConnected && (
+              <button
+                onClick={toggleMicrophone}
+                className="glass-card px-5 py-3.5 rounded-full text-sm font-medium border border-[var(--border-subtle)] text-[var(--text-primary)] hover:bg-[var(--bg-surface-elevated)] transition-colors cursor-pointer flex items-center gap-2"
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    isMicrophoneEnabled ? "bg-emerald-500" : "bg-zinc-500"
+                  }`}
+                />
+                <span>{isMicrophoneEnabled ? "Mute Mic" : "Unmute Mic"}</span>
+              </button>
+            )}
+          </div>
+
+          {/* Dual Channel Audio Waveforms */}
+          {isConnected && (
+            <div
+              ref={waveformRef}
+              className="grid grid-cols-2 gap-3 w-full"
+            >
+              <LiveWaveform
+                levels={micLevels}
+                color="var(--state-listening)"
+                label="Mic In (You)"
+                onSnap={interruptFlashKey > 0}
+              />
+              <LiveWaveform
+                levels={agentLevels}
+                color="var(--state-speaking)"
+                label="Voice Out (Rime)"
+                onSnap={interruptFlashKey > 0}
+              />
+            </div>
+          )}
+
+          {/* Quick-Barge Prompt Chips */}
+          <div className="glass-card w-full p-4 rounded-2xl border border-[var(--border-subtle)]">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-[var(--text-secondary)]">
+                Try Interrupting With:
+              </span>
+              <span className="font-mono text-[10px] text-[var(--text-muted)]">
+                {copiedPrompt ? "✓ Copied to clipboard!" : "Click prompt to copy"}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {QUICK_BARGE_PROMPTS.map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => handleCopyPrompt(prompt)}
+                  className="font-mono text-[11px] px-3 py-1.5 rounded-lg bg-[var(--bg-base)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors cursor-pointer text-left"
+                >
+                  "{prompt}"
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: Tabbed Transcript & System Telemetry Deck (col-span-5) */}
+        <div className="lg:col-span-6 flex flex-col gap-4 w-full">
+          {/* Tab Bar */}
+          <div className="flex items-center justify-between border-b border-[var(--border-subtle)] pb-2">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setActiveTab("transcript")}
+                className={`font-mono text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === "transcript"
+                    ? "bg-[var(--accent)] text-white shadow-sm"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                <span>Live Dialogue</span>
+                <span className="text-[10px] opacity-80 font-mono">({transcripts.length})</span>
+              </button>
+              <button
+                onClick={() => setActiveTab("logs")}
+                className={`font-mono text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === "logs"
+                    ? "bg-[var(--accent)] text-white shadow-sm"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                <span>Telemetry SSE</span>
+                <span className="text-[10px] opacity-80 font-mono">({events.length})</span>
+              </button>
+            </div>
+
+            <span className="font-mono text-[10px] text-[var(--text-muted)]">
+              {activeTab === "transcript" ? "Deepgram + Rime" : "FastAPI /events"}
+            </span>
+          </div>
+
+          {/* Active Tab View */}
+          <div className="w-full">
+            <AnimatePresence mode="wait">
+              {activeTab === "transcript" ? (
+                <motion.div
+                  key="transcript-view"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <TranscriptPanel transcripts={transcripts} />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="logs-view"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <SystemLogPanel events={events} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
+

@@ -1,16 +1,23 @@
 import { useState } from "react";
+import { ThemeProvider } from "./context/ThemeContext";
 import { CallScreen } from "./components/CallScreen";
 import { IntroScreen } from "./components/IntroScreen";
 
-function App() {
+function AppContent() {
   const [showIntro, setShowIntro] = useState(true);
 
-  const handleStart = () => setShowIntro(false);
-
   return showIntro ? (
-    <IntroScreen onStart={handleStart} />
+    <IntroScreen onStart={() => setShowIntro(false)} />
   ) : (
-    <CallScreen />
+    <CallScreen onReturnToIntro={() => setShowIntro(true)} />
+  );
+}
+
+function App() {
+  return (
+    <ThemeProvider>
+      <AppContent />
+    </ThemeProvider>
   );
 }
 

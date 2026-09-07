@@ -14,8 +14,8 @@ export function LiveWaveform({
   levels,
   color,
   label,
-  barWidth = 3,
-  maxHeight = 48,
+  barWidth = 4,
+  maxHeight = 44,
   onSnap = false,
 }: LiveWaveformProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -29,38 +29,65 @@ export function LiveWaveform({
     el.classList.add("waveform-snap-flash");
   }, [onSnap]);
 
+  // Compute peak level across the current buffer
+  const peakLevel = levels.length > 0 ? Math.max(...levels) : 0;
+  const isActive = peakLevel > 0.05;
+
   return (
-    <div ref={containerRef} className="flex flex-col gap-1.5 overflow-hidden">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold tracking-wide uppercase text-[var(--text-secondary)]">
-          {label}
-        </span>
-        {onSnap && (
-          <span className="w-2 h-2 rounded-full bg-[var(--state-interrupted)] animate-pulse" />
-        )}
-      </div>
-      <motion.div
-        className="flex items-end gap-[2px] rounded-lg overflow-hidden"
-        style={{ height: maxHeight }}
-        animate={onSnap ? { backgroundColor: "rgba(220,38,38,0.08)" } : {}}
-        transition={{ duration: 0.5 }}
-      >
-        {levels.map((v, i) => (
-          <motion.div
-            key={i}
-            className="rounded-sm"
-            animate={{
-              height: `${Math.max(4, v * maxHeight)}px`,
-              opacity: 0.35 + v * 0.65,
-            }}
-            transition={{ duration: 0.06, ease: "easeOut" }}
+    <div
+      ref={containerRef}
+      className="glass-card flex flex-col gap-2 p-3 rounded-xl transition-colors duration-200"
+    >
+      <div className="flex items-center justify-between text-xs">
+        <div className="flex items-center gap-2">
+          <span
+            className="w-2 h-2 rounded-full transition-transform duration-200"
             style={{
-              width: barWidth,
               backgroundColor: color,
+              boxShadow: isActive ? `0 0 8px ${color}` : "none",
+              transform: isActive ? "scale(1.2)" : "scale(1)",
             }}
           />
-        ))}
-      </motion.div>
+          <span className="font-mono text-[11px] font-semibold tracking-wider uppercase text-[var(--text-secondary)]">
+            {label}
+          </span>
+        </div>
+        <div className="flex items-center gap-1 font-mono text-[10px] text-[var(--text-muted)]">
+          <span>{Math.round(peakLevel * 100)}%</span>
+          {onSnap && (
+            <span className="ml-1 px-1 py-0.2 rounded text-[9px] font-bold bg-red-500/20 text-red-500 animate-pulse">
+              SNAP
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div
+        className="flex items-end justify-between gap-[3px] h-[44px] px-1 overflow-hidden rounded-lg bg-[var(--bg-base)]/50 border border-[var(--border-subtle)]"
+        style={{ height: maxHeight }}
+      >
+        {levels.map((v, i) => {
+          const heightPx = Math.max(3, Math.round(v * maxHeight));
+          const isHigh = v > 0.7;
+          return (
+            <motion.div
+              key={i}
+              className="rounded-full transition-all"
+              animate={{
+                height: `${heightPx}px`,
+                opacity: v > 0.05 ? 0.95 : 0.25,
+              }}
+              transition={{ duration: 0.05, ease: "easeOut" }}
+              style={{
+                width: barWidth,
+                backgroundColor: isHigh && onSnap ? "var(--state-interrupted)" : color,
+                boxShadow: isHigh ? `0 0 6px ${color}` : "none",
+              }}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
+
