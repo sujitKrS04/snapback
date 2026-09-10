@@ -14,6 +14,20 @@ A real-time LiveKit Python voice agent built for full-duplex conversational voic
 
 ---
 
+## Demonstration & Presentation Materials
+
+| Resource | Format | Link / Access |
+| :--- | :--- | :--- |
+| **Live Video Demonstration** | Video Walkthrough | [Watch on YouTube (`https://youtu.be/X9_Dq5HIswU`)](https://youtu.be/X9_Dq5HIswU) |
+| **Architecture & Project Presentation** | Microsoft PowerPoint (`.pptx`) | [`Snapback_ Safe Voice Interruptions.pptx`](<Snapback_ Safe Voice Interruptions.pptx>) |
+| **GitHub & Demo Submission Document** | PDF Document (`.pdf`) | [`Github & Demo.pdf`](<Github & Demo.pdf>) |
+
+> **File Access on GitHub**:
+> - [`Github & Demo.pdf`](<Github & Demo.pdf>) renders directly in GitHub's native PDF previewer.
+> - [`Snapback_ Safe Voice Interruptions.pptx`](<Snapback_ Safe Voice Interruptions.pptx>) can be viewed and downloaded directly from the repository.
+
+---
+
 ## Organizer Preflight Verification: Rime Catalog & Transport
 
 This table confirms that the exact combination used in `agent.py` matches Rime's live catalog specifications and the organizer's preflight check:

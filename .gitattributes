@@ -1,0 +1,12 @@
+# Ensure binary files are never modified by line ending conversions
+* text=auto
+
+*.pdf binary
+*.pptx binary
+*.mp4 binary
+*.wav binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.webm binary

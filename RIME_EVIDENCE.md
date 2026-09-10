@@ -228,6 +228,10 @@ The primary real-world verification benchmark for Snapback's interrupt latency w
 - **Audio Source**: Physical hardware microphone capturing real human vocal utterances.
 - **WebRTC Transport**: LiveKit Cloud room (`snapback-call`) with native C++ WebRTC audio tracks and data channels.
 - **ASR**: Real-time streaming Deepgram (`nova-3`).
+- **Demonstration & Submission Materials**:
+  - 📺 [Live Video Demonstration (YouTube)](https://youtu.be/X9_Dq5HIswU)
+  - 📊 [Slide Deck Presentation (`Snapback_ Safe Voice Interruptions.pptx`)](<Snapback_ Safe Voice Interruptions.pptx>)
+  - 📄 [GitHub & Demo Document (`Github & Demo.pdf`)](<Github & Demo.pdf>)
 
 ### Primary Live Interruption Dataset ($N = 11$, `run-f6d66d9d`)
 
