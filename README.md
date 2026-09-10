@@ -150,16 +150,6 @@ Open `http://localhost:5173/` in your browser to start a full-duplex conversatio
 
 ---
 
-## Live Demonstrations & Video Artifacts
-
-Three live demonstration video recordings captured directly from the physical hardware microphone, WebRTC live room (`snapback-call`), and Snapback Studio frontend:
-
-1. **[`live_demo_1.mp4`](live_demo_1.mp4)**: Complete conversational appointment booking flow with live Deepgram ASR, Rime Coda synthesis, and instant voice interruptions.
-2. **[`live_demo_2.mp4`](live_demo_2.mp4)**: Interactive barge-in and quick-prompt chip testing demonstrating sub-50ms audio cancellations during active tool execution and speech.
-3. **[`live_demo_3.mp4`](live_demo_3.mp4)**: Full-duplex conversational voice turn transitions, resilient participant reconnection, and real-time SSE latency telemetry.
-
----
-
 ## Structured Timeline Log Format
 
 All stage transitions are written to `logs/agent.log` (and `/logs/agent.log` if permissions allow) as valid JSON lines with complete timeline reconstruction metadata:
